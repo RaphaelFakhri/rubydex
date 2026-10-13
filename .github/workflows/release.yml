@@ -63,12 +63,16 @@ jobs:
         with:
           ruby-version: "3.2.9"
           bundler-cache: true
+      - name: "Update RubyGems"
+        run: gem update --system 4.1.0.beta2 --prerelease
       - name: "Install cargo-about"
         run: cargo install cargo-about --features cli
       - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "compile"
+          version: "0.4.1"
+          include-single-abi: true
   test:
     timeout-minutes: 20
     name: "Run the test suite"
@@ -87,10 +91,15 @@ jobs:
         with:
           ruby-version: "${{ matrix.rubies }}"
           bundler-cache: true
+      - name: "Update RubyGems"
+        if: matrix.type == 'cross'
+        run: gem update --system 4.1.0.beta2 --prerelease
       - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "test_${{ matrix.type }}"
+          version: "0.4.1"
+          include-single-abi: true
   install:
     timeout-minutes: 10
     name: "Verify the gem can be installed"
@@ -108,6 +117,7 @@ jobs:
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "install"
+          version: "0.4.1"
   release:
     environment: release
     permissions:
@@ -123,10 +133,13 @@ jobs:
         uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           ruby-version: "4.0.0"
+      - name: "Update RubyGems"
+        run: gem update --system 4.1.0.beta2 --prerelease
       - name: "Run cibuildgem"
         uses: "shopify/cibuildgem/.github/actions/cibuildgem@main"
         with:
           step: "release"
+          version: "0.4.1"
   release_crates:
     environment: release
     permissions:

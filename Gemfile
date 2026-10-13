@@ -6,7 +6,7 @@ source "https://rubygems.org"
 gemspec
 
 gem "rake", "~> 13.4"
-gem "rake-compiler"
+gem "rake-compiler", ">= 1.3.2"
 gem "minitest"
 gem "rdoc"
 gem "mocha"
