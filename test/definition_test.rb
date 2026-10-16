@@ -307,6 +307,32 @@ class DefinitionTest < Minitest::Test
     end
   end
 
+  def test_class_definition_superclass_with_same_name_in_outer_namespace
+    with_context do |context|
+      context.write!("file1.rb", <<~RUBY)
+        class ApplicationRecord
+        end
+
+        module GSD
+          class ApplicationRecord < ApplicationRecord
+          end
+        end
+      RUBY
+
+      graph = Rubydex::Graph.new
+      graph.index_all(context.glob("**/*.rb"))
+      graph.resolve
+
+      definition = graph["GSD::ApplicationRecord"].definitions.find do |candidate|
+        candidate.is_a?(Rubydex::ClassDefinition)
+      end
+      superclass_ref = definition.superclass
+
+      assert_instance_of(Rubydex::ResolvedConstantReference, superclass_ref)
+      assert_equal("ApplicationRecord", superclass_ref.declaration.name)
+    end
+  end
+
   def test_class_definition_mixins
     with_context do |context|
       context.write!("file1.rb", <<~RUBY)
