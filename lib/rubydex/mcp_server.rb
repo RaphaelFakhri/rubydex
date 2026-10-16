@@ -16,6 +16,7 @@ module Rubydex
 
     class Server
       WORKER_COUNT = 4
+      SHUTDOWN_JOIN_TIMEOUT = 2
 
       #: (root_path: String, ?transport: StdioTransport) -> void
       def initialize(root_path:, transport: nil)
@@ -27,13 +28,14 @@ module Rubydex
         @outgoing_queue = Thread::Queue.new
         @workers = []
         @outgoing_dispatcher = nil
+        @indexer = nil
       end
 
       attr_reader :root_path
 
       #: -> Thread
       def spawn_indexer
-        Thread.new do
+        @indexer = Thread.new do
           @graph.index_workspace
           @graph.resolve
           @index_finished = true
@@ -143,9 +145,26 @@ module Rubydex
       #: -> void
       def run_shutdown
         @incoming_queue.close unless @incoming_queue.closed?
-        @workers.each(&:join)
+        join_or_kill_all(@workers + [@indexer])
         @outgoing_queue.close unless @outgoing_queue.closed?
-        @outgoing_dispatcher&.join
+        join_or_kill_all([@outgoing_dispatcher])
+      end
+
+      #: (Array[Thread?]) -> void
+      def join_or_kill_all(threads)
+        live_threads = threads.compact.select(&:alive?)
+        return if live_threads.empty?
+
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SHUTDOWN_JOIN_TIMEOUT
+        live_threads.each do |thread|
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          break if remaining <= 0
+
+          thread.join(remaining)
+        end
+
+        live_threads.select(&:alive?).each(&:kill)
+        live_threads.select(&:alive?).each(&:join)
       end
 
       #: -> Thread
