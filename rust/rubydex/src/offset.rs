@@ -30,21 +30,9 @@ impl Offset {
         Self { start, end }
     }
 
-    /// # Panics
-    ///
-    /// This function can panic if the Prism location offsets do not fit into a u32
     #[must_use]
     pub fn from_prism_location(location: &ruby_prism::Location) -> Self {
-        Self::new(
-            location
-                .start_offset()
-                .try_into()
-                .expect("Expected usize `start` to fit in `u32`"),
-            location
-                .end_offset()
-                .try_into()
-                .expect("Expected usize `end` to fit in `u32`"),
-        )
+        Self::new(location.start(), location.end())
     }
 
     /// # Panics
