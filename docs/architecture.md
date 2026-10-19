@@ -217,6 +217,8 @@ The purpose of the loop is to solve all of the work that has inverse dependencie
 depend on another constant being resolved. After we're done, we have a separate step for processing definitions that
 have no inverse dependencies (like instance variables).
 
+When several references share one name, invalidation detaches every reference from the old declaration before it resolves them again.
+
 #### Important design and implementation note
 
 When making changes to resolution, it is critical to understand if they fit the overall approach of the algorithm. The

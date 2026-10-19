@@ -982,6 +982,26 @@ mod superclass_tests {
     use super::*;
 
     #[test]
+    fn shared_constant_references_detach_after_ancestor_change() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///bases.rb",
+            "class Parent\n  TOKEN = 1\nend\nmodule M\n  TOKEN = 2\nend",
+        );
+        context.index_uri("file:///child.rb", "class Child < Parent\n  TOKEN\n  TOKEN\nend");
+        context.resolve();
+        assert_declaration_references_count_eq!(context, "Parent::TOKEN", 2);
+
+        context.index_uri("file:///mixin.rb", "class Child\n  include M\nend");
+        context.resolve();
+
+        assert_declaration_references_count_eq!(context, "Parent::TOKEN", 0);
+        assert_declaration_references_count_eq!(context, "M::TOKEN", 2);
+        assert_constant_reference_to!(context, "M::TOKEN", "file:///child.rb:2:3-2:8");
+        assert_constant_reference_to!(context, "M::TOKEN", "file:///child.rb:3:3-3:8");
+    }
+
+    #[test]
     fn linearizing_super_classes() {
         let mut context = graph_test();
         context.index_uri("file:///foo.rb", {

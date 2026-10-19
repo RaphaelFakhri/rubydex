@@ -741,24 +741,6 @@ impl Graph {
         }
     }
 
-    /// Unresolves a constant reference: removes it from the target declaration's reference set
-    /// and unresolves its underlying name.
-    fn unresolve_reference(&mut self, reference_id: ConstantReferenceId) -> Option<DeclarationId> {
-        let constant_ref = self.constant_references.get(&reference_id)?;
-        let name_id = *constant_ref.name_id();
-
-        if let Some(old_decl_id) = self.unresolve_name(name_id) {
-            self.declarations
-                .get_mut(&old_decl_id)
-                .expect("Tried to unresolve reference for declaration that doesn't exist in the graph")
-                .remove_constant_reference(&reference_id);
-
-            Some(old_decl_id)
-        } else {
-            None
-        }
-    }
-
     /// Removes a name from the graph and cleans up its name-to-name edges from parent names.
     fn remove_name(&mut self, name_id: NameId) {
         if let Some(name_ref) = self.names.get(&name_id) {
@@ -1367,12 +1349,19 @@ impl Graph {
         let dependents: Vec<NameDependent> = self.name_dependents.get(&name_id).cloned().unwrap_or_default();
         self.queue_ancestor_triggered_invalidation(name_id, queue);
 
-        let is_resolved = matches!(self.names.get(&name_id), Some(NameRef::Resolved(_)));
+        let mut old_declaration = None;
+        let mut invalidated = false;
 
         for dep in &dependents {
             if let NameDependent::Reference(ref_id) = dep {
-                if is_resolved {
-                    self.unresolve_reference(*ref_id);
+                if !invalidated {
+                    old_declaration = self.unresolve_name(name_id);
+                    invalidated = true;
+                }
+                if let Some(old_id) = old_declaration
+                    && let Some(declaration) = self.declarations.get_mut(&old_id)
+                {
+                    declaration.remove_constant_reference(ref_id);
                 }
                 self.push_work(Unit::ConstantRef(*ref_id));
             }
