@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque, hash_map::Entry};
 
 use crate::diagnostic::{Diagnostic, Rule};
 use crate::model::{
-    built_in::{BASIC_OBJECT_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID},
+    built_in::{BASIC_OBJECT_ID, BUILT_IN_URI_ID, CLASS_ID, KERNEL_ID, MODULE_ID, OBJECT_ID},
     declaration::{
         Ancestor, Ancestors, ClassDeclaration, ClassVariableDeclaration, ConstantAliasDeclaration, ConstantDeclaration,
         Declaration, GlobalVariableDeclaration, InstanceVariableDeclaration, MethodDeclaration, ModuleDeclaration,
@@ -12,7 +12,7 @@ use crate::model::{
     graph::{Graph, Unit},
     identity_maps::{IdentityHashBuilder, IdentityHashMap, IdentityHashSet},
     ids::{ConstantReferenceId, DeclarationId, DefinitionId, NameId, StringId, UriId},
-    name::{Name, NameRef, ParentScope},
+    name::{Name, NameContext, NameRef, ParentScope},
     visibility::Visibility,
 };
 
@@ -27,6 +27,12 @@ enum Outcome {
     /// blocker was a still-partial ancestor chain (the member may appear once the chain completes); `false` when it was
     /// a plain missing dependency (an unresolved parent scope, alias, or lexical nesting).
     Retry { partial_ancestors: bool },
+}
+
+#[derive(Clone, Copy)]
+struct SuperclassLookup {
+    definition_id: DefinitionId,
+    binding_id: DeclarationId,
 }
 
 impl Outcome {
@@ -97,6 +103,7 @@ pub struct Resolver<'a> {
     graph: &'a mut Graph,
     /// Contains all units of work for resolution, sorted in order for resolution (less complex constant names first)
     unit_queue: VecDeque<Unit>,
+    queued_references: IdentityHashSet<ConstantReferenceId>,
     /// Whether we made any progress in the last pass of the resolution loop
     made_progress: bool,
     /// The linearization context carried across recursion
@@ -108,6 +115,7 @@ impl<'a> Resolver<'a> {
         Self {
             graph,
             unit_queue: VecDeque::new(),
+            queued_references: IdentityHashSet::default(),
             made_progress: false,
             context: LinearizationContext::new(),
         }
@@ -124,7 +132,8 @@ impl<'a> Resolver<'a> {
     ///
     /// Can panic if there's inconsistent data in the graph
     pub fn resolve(&mut self) {
-        let other_ids = self.prepare_units();
+        let mut other_ids = self.prepare_units();
+        let mut has_late_definitions = false;
 
         loop {
             // Flag to ensure the end of the resolution loop. We go through all items in the queue based on its current
@@ -141,9 +150,29 @@ impl<'a> Resolver<'a> {
 
                 match unit_id {
                     Unit::Definition(id) => {
-                        self.handle_definition_unit(unit_id, id);
+                        let convergent = match self.graph.definitions().get(&id) {
+                            Some(
+                                Definition::Class(_)
+                                | Definition::Module(_)
+                                | Definition::Constant(_)
+                                | Definition::ConstantAlias(_)
+                                | Definition::SingletonClass(_),
+                            ) => true,
+                            Some(Definition::Method(method)) => {
+                                matches!(method.receiver(), Some(Receiver::SelfReceiver(_)))
+                            }
+                            Some(_) => false,
+                            None => continue,
+                        };
+                        if convergent {
+                            self.handle_definition_unit(unit_id, id);
+                        } else {
+                            other_ids.push(id);
+                            has_late_definitions = true;
+                        }
                     }
                     Unit::ConstantRef(id) => {
+                        self.queued_references.remove(&id);
                         self.handle_reference_unit(unit_id, id);
                     }
                     Unit::Ancestors(id) => {
@@ -164,6 +193,17 @@ impl<'a> Resolver<'a> {
         // they're retried on the next resolve() call.
         self.graph.extend_work(std::mem::take(&mut self.unit_queue));
 
+        if has_late_definitions {
+            other_ids.sort_unstable();
+            other_ids.dedup();
+            other_ids.sort_unstable_by_key(|id| {
+                let definition = self.graph.definitions().get(id).unwrap();
+                (
+                    self.graph.documents().get(definition.uri_id()).unwrap().uri(),
+                    definition.offset(),
+                )
+            });
+        }
         self.handle_remaining_definitions(other_ids);
     }
 
@@ -179,6 +219,7 @@ impl<'a> Resolver<'a> {
     /// Handles a unit of work for resolving a constant definition or singleton method
     fn handle_definition_unit(&mut self, unit_id: Unit, id: DefinitionId) {
         let mut needs_linearization = false;
+        let work_start = self.graph.pending_work_len();
 
         let outcome = match self.graph.definitions().get(&id).unwrap() {
             Definition::Class(class) => {
@@ -253,6 +294,15 @@ impl<'a> Resolver<'a> {
                 self.made_progress = true;
             }
         }
+        // Binding changes can invalidate header reads during this resolution pass.
+        for unit in self.graph.drain_work_from(work_start) {
+            if let Unit::ConstantRef(id) = unit
+                && !self.queued_references.insert(id)
+            {
+                continue;
+            }
+            self.unit_queue.push_back(unit);
+        }
     }
 
     /// Clears and re-enqueues the ancestors of a declaration's singleton class and all of its higher-order singleton
@@ -290,6 +340,7 @@ impl<'a> Resolver<'a> {
                 self.made_progress = true;
             }
             Outcome::Retry { .. } => {
+                self.queued_references.insert(id);
                 self.unit_queue.push_back(unit_id);
             }
             Outcome::Unresolved => {
@@ -302,6 +353,10 @@ impl<'a> Resolver<'a> {
 
     /// Handles a unit of work for linearizing ancestors of a declaration
     fn handle_ancestor_unit(&mut self, id: DeclarationId) {
+        // A binding change can remove a declaration after its ancestor unit was queued.
+        if !self.graph.declarations().contains_key(&id) {
+            return;
+        }
         match self.linearize_ancestors(id) {
             Ancestors::Complete(_) | Ancestors::Cyclic(_) => {
                 // We succeeded in some capacity this time
@@ -1475,10 +1530,14 @@ impl<'a> Resolver<'a> {
             NameRef::Resolved(resolved) => return Outcome::Resolved(*resolved.declaration_id()),
             NameRef::Unresolved(name) => name.as_ref().clone(),
         };
+        let lookup = match self.superclass_lookup(&name) {
+            Ok(lookup) => lookup,
+            Err(outcome) => return outcome,
+        };
 
         match name.parent_scope() {
             ParentScope::TopLevel => {
-                let result = self.search_ancestors(*OBJECT_ID, *name.str());
+                let result = self.search_ancestors_with_lookup(*OBJECT_ID, *name.str(), lookup);
 
                 if let Outcome::Resolved(declaration_id) = result {
                     self.graph.record_resolved_name(name_id, declaration_id);
@@ -1534,7 +1593,7 @@ impl<'a> Resolver<'a> {
             }
             ParentScope::None => {
                 // Otherwise, it's a simple constant read and we can resolve it directly
-                let result = self.run_resolution(&name);
+                let result = self.run_resolution(&name, lookup);
 
                 if let Outcome::Resolved(declaration_id) = result {
                     self.graph.record_resolved_name(name_id, declaration_id);
@@ -1568,7 +1627,7 @@ impl<'a> Resolver<'a> {
                         Some(Declaration::Namespace(_)) => {
                             found_namespace = true;
 
-                            match self.search_ancestors(id, *name.str()) {
+                            match self.search_ancestors_with_lookup(id, *name.str(), lookup) {
                                 Outcome::Resolved(declaration_id) => {
                                     self.graph.record_resolved_name(name_id, declaration_id);
                                     return Outcome::Resolved(declaration_id);
@@ -1579,11 +1638,9 @@ impl<'a> Resolver<'a> {
                                     missing_partial = true;
                                 }
                                 Outcome::Unresolved => {}
-                                Outcome::Retry {
+                                retry @ Outcome::Retry {
                                     partial_ancestors: false,
-                                } => {
-                                    unreachable!("search_ancestors never returns a non-partial Retry")
-                                }
+                                } => return retry,
                             }
                         }
                         _ => {
@@ -1662,11 +1719,76 @@ impl<'a> Resolver<'a> {
         results
     }
 
-    fn run_resolution(&mut self, name: &Name) -> Outcome {
+    fn superclass_lookup(&self, name: &Name) -> Result<Option<SuperclassLookup>, Outcome> {
+        let NameContext::Superclass(definition_id) = name.context() else {
+            return Ok(None);
+        };
+        let Some(definition) = self.graph.definitions().get(&definition_id) else {
+            return Err(Outcome::Retry {
+                partial_ancestors: false,
+            });
+        };
+        if self
+            .graph
+            .documents()
+            .get(definition.uri_id())
+            .unwrap()
+            .binding_event(definition_id)
+            .is_none()
+        {
+            // Anonymous constructors do not introduce a constant binding.
+            return Ok(None);
+        }
+        self.graph
+            .definition_id_to_declaration_id(definition_id)
+            .copied()
+            .map(|binding_id| {
+                Some(SuperclassLookup {
+                    definition_id,
+                    binding_id,
+                })
+            })
+            .ok_or(Outcome::Retry {
+                partial_ancestors: false,
+            })
+    }
+
+    /// `None` means the candidate is not visible yet. Retry stops lookup at an uncertain binding.
+    fn visible_candidate(&self, candidate: DeclarationId, lookup: Option<SuperclassLookup>) -> Option<Outcome> {
+        let Some(lookup) = lookup.filter(|lookup| lookup.binding_id == candidate) else {
+            return Some(Outcome::Resolved(candidate));
+        };
+        let header = self.graph.definitions().get(&lookup.definition_id).unwrap();
+        let header_document = self.graph.documents().get(header.uri_id()).unwrap();
+        let header_info = header_document.binding_event(lookup.definition_id).unwrap();
+        let mut unknown = !header_info.ordered;
+        for definition_id in self.graph.declarations().get(&candidate).unwrap().definitions() {
+            let definition = self.graph.definitions().get(definition_id).unwrap();
+            if definition.uri_id() == &*BUILT_IN_URI_ID {
+                return Some(Outcome::Resolved(candidate));
+            }
+            let document = self.graph.documents().get(definition.uri_id()).unwrap();
+            let Some(info) = document.binding_event(*definition_id) else {
+                continue;
+            };
+            if definition.uri_id() == header.uri_id() && info.ordered {
+                if info.effect_offset < header.offset().start() {
+                    return Some(Outcome::Resolved(candidate));
+                }
+            } else {
+                unknown = true;
+            }
+        }
+        unknown.then_some(Outcome::Retry {
+            partial_ancestors: false,
+        })
+    }
+
+    fn run_resolution(&mut self, name: &Name, lookup: Option<SuperclassLookup>) -> Outcome {
         let str_id = *name.str();
 
         if let Some(nesting) = name.nesting() {
-            let scope_outcome = self.search_lexical_scopes(name, str_id);
+            let scope_outcome = self.search_lexical_scopes(name, str_id, lookup);
 
             // If we already resolved or need to retry, return early
             if scope_outcome.is_resolved_or_retry() {
@@ -1689,7 +1811,7 @@ impl<'a> Resolver<'a> {
                             }
                             Some(Declaration::Namespace(_)) => {
                                 decl_id = Some(id);
-                                result = self.search_ancestors(id, str_id);
+                                result = self.search_ancestors_with_lookup(id, str_id, lookup);
                                 break;
                             }
                             _ => {}
@@ -1709,6 +1831,16 @@ impl<'a> Resolver<'a> {
             if matches!(ancestor_outcome, Outcome::Resolved(..)) {
                 return ancestor_outcome;
             }
+            if lookup.is_some()
+                && matches!(
+                    ancestor_outcome,
+                    Outcome::Retry {
+                        partial_ancestors: false
+                    }
+                )
+            {
+                return ancestor_outcome;
+            }
 
             // Modules don't inherit from Object, but Ruby gives them a special fallback to Object's ancestors.
             // For incomplete ancestor chains, we also try Object as a tentative resolution to avoid unnecessary retries.
@@ -1726,7 +1858,7 @@ impl<'a> Resolver<'a> {
             );
 
             if is_module || chain_incomplete {
-                let object_outcome = self.search_ancestors(*OBJECT_ID, str_id);
+                let object_outcome = self.search_ancestors_with_lookup(*OBJECT_ID, str_id, lookup);
 
                 match object_outcome {
                     // Found the constant through Object's ancestors.
@@ -1744,11 +1876,16 @@ impl<'a> Resolver<'a> {
         // When there's no nesting, we're working at the top level of a script. The top level is the magic `<main>`
         // object, which is an instance of `Object`. To resolve constants at the top level, we need to search the
         // ancestors of `Object`
-        self.search_ancestors(*OBJECT_ID, str_id)
+        self.search_ancestors_with_lookup(*OBJECT_ID, str_id, lookup)
     }
 
     /// Search for a member in a declaration's ancestor chain.
-    fn search_ancestors(&mut self, declaration_id: DeclarationId, str_id: StringId) -> Outcome {
+    fn search_ancestors_with_lookup(
+        &mut self,
+        declaration_id: DeclarationId,
+        str_id: StringId,
+        lookup: Option<SuperclassLookup>,
+    ) -> Outcome {
         match self.linearize_ancestors(declaration_id) {
             Ancestors::Complete(ids) | Ancestors::Cyclic(ids) => ids
                 .iter()
@@ -1761,7 +1898,7 @@ impl<'a> Resolver<'a> {
                             .as_namespace()
                             .unwrap()
                             .member(&str_id)
-                            .map(|id| Outcome::Resolved(*id))
+                            .and_then(|id| self.visible_candidate(*id, lookup))
                     } else {
                         None
                     }
@@ -1788,8 +1925,9 @@ impl<'a> Resolver<'a> {
                                 .as_namespace()
                                 .unwrap()
                                 .member(&str_id)
+                                && let Some(outcome) = self.visible_candidate(*id, lookup)
                             {
-                                return Outcome::Resolved(*id);
+                                return outcome;
                             }
                         }
                     }
@@ -1802,7 +1940,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Look for the constant in the lexical scopes that are a part of its nesting
-    fn search_lexical_scopes(&self, name: &Name, str_id: StringId) -> Outcome {
+    fn search_lexical_scopes(&self, name: &Name, str_id: StringId, lookup: Option<SuperclassLookup>) -> Outcome {
         let mut current_name = name;
 
         while let Some(nesting_id) = current_name.nesting() {
@@ -1812,8 +1950,9 @@ impl<'a> Resolver<'a> {
                 if let Some(namespace_id) = self.resolve_to_namespace(declaration_id)
                     && let Some(namespace) = self.graph.declarations().get(&namespace_id).unwrap().as_namespace()
                     && let Some(member) = namespace.member(&str_id)
+                    && let Some(outcome) = self.visible_candidate(*member, lookup)
                 {
-                    return Outcome::Resolved(*member);
+                    return outcome;
                 }
 
                 current_name = nesting_name_ref.name();
@@ -1891,7 +2030,6 @@ impl<'a> Resolver<'a> {
         // Dedup: when multiple files are indexed before resolution runs, pending_work accumulates
         // and the same definition/reference ID can be enqueued more than once.
         let mut seen_defs = IdentityHashSet::<DefinitionId>::default();
-        let mut seen_references = IdentityHashSet::<ConstantReferenceId>::default();
         let mut seen_ancestors = IdentityHashSet::<DeclarationId>::default();
 
         for unit in work {
@@ -1939,7 +2077,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 Unit::ConstantRef(id) => {
-                    if !seen_references.insert(id) {
+                    if !self.queued_references.insert(id) {
                         continue;
                     }
                     // Reference may have been removed by remove_document_data — skip stale items

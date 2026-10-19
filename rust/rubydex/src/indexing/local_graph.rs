@@ -73,7 +73,7 @@ impl LocalGraph {
 
     /// # Panics
     ///
-    /// Panics if a class superclass reference is missing.
+    /// Panics if a class superclass reference or one of its path names is missing.
     pub fn add_definition(&mut self, definition: Definition) -> DefinitionId {
         let definition_id = definition.id();
 
@@ -92,6 +92,17 @@ impl LocalGraph {
                 .entry(name_id)
                 .or_default()
                 .push(NameDependent::SuperclassConsumer(definition_id));
+            let mut current = Some(name_id);
+            while let Some(id) = current {
+                let name = self.names.get(&id).unwrap();
+                if name.context() == NameContext::Superclass(definition_id) {
+                    self.name_dependents
+                        .entry(*class.name_id())
+                        .or_default()
+                        .push(NameDependent::SuperclassName(id));
+                }
+                current = name.parent_scope().as_ref().copied();
+            }
         }
 
         if self.definitions.insert(definition_id, definition).is_some() {

@@ -201,6 +201,12 @@ Keyword class and module bindings take effect before their bodies.
 Assignments take effect after their right-hand expressions finish.
 Both Ruby indexing implementations produce this information; RBS and synthetic namespaces do not.
 
+For superclass lookup, the resolver checks the binding under creation.
+An earlier ordered binding in the same document remains visible.
+Only the current binding and known later bindings are absent from the header view.
+Conditional execution and competing Ruby bindings in other documents leave that view unknown.
+This does not impose a load order on the graph.
+
 ### Resolution
 
 Resolution combines all of the data discovered during indexing to build a semantic representation of the codebase. The
@@ -230,10 +236,14 @@ The purpose of the loop is to solve all of the work that has inverse dependencie
 depend on another constant being resolved. After we're done, we have a separate step for processing definitions that
 have no inverse dependencies (like instance variables).
 
+Superclass dependencies connect each contextual name to the class binding it observes, even when lookup skips that binding.
+Binding changes clear those names and their dependent path components.
 Superclass reference changes also clear the consuming class's ancestors, descendants, and singleton hierarchy.
 This includes alias target changes that retain the same alias declaration ID.
 Deletion removes these non-owning edges without increasing name reference counts.
 
+Invalidation can add work during resolution.
+The resolver keeps reference work unique, ignores removed ancestor units, and defers ordinary definitions until convergence.
 When several references share one name, invalidation detaches every reference from the old declaration before it resolves them again.
 
 #### Important design and implementation note

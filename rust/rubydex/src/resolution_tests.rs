@@ -980,6 +980,183 @@ mod constant_alias_tests {
 
 mod superclass_binding_tests {
     use super::*;
+    use crate::model::definitions::Definition;
+
+    fn assert_superclasses(context: &GraphTest, name: &str, expected: &[Option<&str>]) {
+        let graph = context.graph();
+        let declaration = graph.declarations().get(&DeclarationId::from(name)).unwrap();
+        let mut definitions: Vec<_> = declaration
+            .definitions()
+            .iter()
+            .filter_map(|id| match graph.definitions().get(id).unwrap() {
+                Definition::Class(class) if class.superclass_ref().is_some() => Some(class),
+                _ => None,
+            })
+            .collect();
+        definitions.sort_by_key(|class| class.offset().start());
+        let actual: Vec<_> = definitions
+            .iter()
+            .map(|class| {
+                let reference = graph
+                    .constant_references()
+                    .get(class.superclass_ref().unwrap())
+                    .unwrap();
+                match graph.names().get(reference.name_id()).unwrap() {
+                    NameRef::Resolved(name) => Some(graph.declarations().get(name.declaration_id()).unwrap().name()),
+                    NameRef::Unresolved(_) => None,
+                }
+            })
+            .collect();
+        assert_eq!(actual, expected, "superclasses of {name}");
+    }
+
+    fn assert_partial(context: &GraphTest, name: &str) {
+        let declaration = context.graph().declarations().get(&DeclarationId::from(name)).unwrap();
+        assert!(matches!(
+            declaration.as_namespace().unwrap().ancestors(),
+            Ancestors::Partial(_)
+        ));
+    }
+
+    #[test]
+    fn namesake_header_body_and_later_reopening() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///namesake.rb",
+            "class C\n  TOKEN = 1\nend\nmodule M\n  class C < C\n    C\n    TOKEN\n  end\n  class C; end\nend",
+        );
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("C")]);
+        assert_constant_reference_to!(context, "M::C", "file:///namesake.rb:6:5-6:6");
+        assert_constant_reference_to!(context, "C::TOKEN", "file:///namesake.rb:7:5-7:10");
+        assert_ancestors_eq!(context, "M::C", ["M::C", "C", "Object", "Kernel", "BasicObject"]);
+    }
+
+    #[test]
+    fn namesake_selects_nearest_outer_scope() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///lexical.rb",
+            "class C; end\nmodule Outer\n  class C; end\n  module Inner\n    class C < C; end\n  end\nend",
+        );
+        context.resolve();
+
+        assert_superclasses(&context, "Outer::Inner::C", &[Some("Outer::C")]);
+    }
+
+    #[test]
+    fn namesake_selects_enclosing_class_ancestor() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///inherited.rb",
+            "class Base\n  class C; end\nend\nclass Container < Base\n  class C < C; end\nend",
+        );
+        context.resolve();
+
+        assert_superclasses(&context, "Container::C", &[Some("Base::C")]);
+    }
+
+    #[test]
+    fn qualified_superclass_keeps_lookup_boundaries() {
+        let mut context = graph_test();
+        context.index_uri("file:///qualified.rb", "class C\n  class Base; end\nend\nmodule M\n  class C < C::Base; end\nend\nmodule N\n  class C < N::C; end\nend\nmodule P\n  class C < ::C; end\nend");
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("C::Base")]);
+        assert_superclasses(&context, "N::C", &[None]);
+        assert_superclasses(&context, "P::C", &[Some("C")]);
+        assert_partial(&context, "N::C");
+    }
+
+    #[test]
+    fn earlier_namesake_is_not_replaced_by_outer_class() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///reopen.rb",
+            "class C; end\nmodule M\n  class C < ::C; end\n  class C < C; end\nend",
+        );
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("C"), Some("M::C")]);
+    }
+
+    #[test]
+    fn earlier_alias_establishes_the_binding() {
+        let mut context = graph_test();
+        context.index_uri("file:///alias.rb", "class Base; end\nclass Existing < Base\n  Parent = Base\nend\nmodule M\n  C = Existing\n  class C < C::Parent; end\nend");
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("Existing::Parent")]);
+        assert_constant_alias_target_eq!(context, "Existing::Parent", "Base");
+    }
+
+    #[test]
+    fn assigned_constructor_reads_the_outer_binding() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///constructor.rb",
+            "class C; end\nmodule M\n  C = Class.new(C)\nend",
+        );
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("C")]);
+        assert_ancestors_eq!(context, "M::C", ["M::C", "C", "Object", "Kernel", "BasicObject"]);
+    }
+
+    #[test]
+    fn uncertain_execution_does_not_guess_an_outer_binding() {
+        for source in [
+            "class C; end\nmodule M; end\nif flag\n  class M::C; end\nend\nmodule M\n  class C < C; end\nend",
+            "class C; end\nmodule M\n  while flag\n    class C < C; end\n  end\nend",
+            "class C; end\nmodule M\n  tap do\n    class C < C; end\n  end\nend",
+            "class C; end\nmodule M; end\nbegin\n  raise\n  class M::C; end\nrescue\nend\nmodule M\n  class C < C; end\nend",
+        ] {
+            let mut context = graph_test();
+            context.index_uri("file:///uncertain.rb", source);
+            context.resolve();
+
+            assert_superclasses(&context, "M::C", &[None]);
+            assert_partial(&context, "M::C");
+        }
+    }
+
+    #[test]
+    fn foreign_binding_insert_delete_matches_fresh_lookup() {
+        let source = "class C; end\nmodule M\n  class C < C; end\nend";
+        let foreign = "module M\n  class C; end\nend";
+        let mut context = graph_test();
+        context.index_uri("file:///header.rb", source);
+        context.resolve();
+        assert_superclasses(&context, "M::C", &[Some("C")]);
+
+        context.index_uri("file:///foreign.rb", foreign);
+        context.resolve();
+        assert_superclasses(&context, "M::C", &[None]);
+        assert_partial(&context, "M::C");
+
+        let mut fresh = graph_test();
+        fresh.index_uri("file:///foreign.rb", foreign);
+        fresh.index_uri("file:///header.rb", source);
+        fresh.resolve();
+        assert_superclasses(&fresh, "M::C", &[None]);
+        assert_partial(&fresh, "M::C");
+
+        context.delete_uri("file:///foreign.rb");
+        context.resolve();
+        assert_superclasses(&context, "M::C", &[Some("C")]);
+        assert_ancestors_eq!(context, "M::C", ["M::C", "C", "Object", "Kernel", "BasicObject"]);
+    }
+
+    #[test]
+    fn signatures_do_not_establish_runtime_binding_order() {
+        let mut context = graph_test();
+        context.index_rbs_uri("file:///signature.rbs", "module M\n  class C\n  end\nend");
+        context.index_uri("file:///header.rb", "class C; end\nmodule M\n  class C < C; end\nend");
+        context.resolve();
+
+        assert_superclasses(&context, "M::C", &[Some("C")]);
+    }
 
     #[test]
     fn alias_retarget_rebuilds_consumers_and_singletons() {

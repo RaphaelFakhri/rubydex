@@ -110,6 +110,37 @@ end
 2. Otherwise, the name is qualified relative to the current namespace
 3. At the top level, unqualified names remain unqualified
 
+### Superclass Expressions and Binding Time
+
+Ruby evaluates a superclass expression before it creates the new class binding.
+The expression uses the enclosing lexical scope, not the class body scope.
+
+```ruby
+class ApplicationRecord
+  TOKEN = :base
+end
+
+module GSD
+  class ApplicationRecord < ApplicationRecord
+    ApplicationRecord # GSD::ApplicationRecord
+    TOKEN             # ApplicationRecord::TOKEN
+  end
+end
+```
+
+The superclass is `::ApplicationRecord`. A later reopening does not change this lookup.
+An earlier class or alias binding remains visible during a reopening.
+If that lookup selects the class itself, Ruby can report a superclass mismatch.
+
+Constant assignments bind after their right-hand expressions finish.
+Thus, `ApplicationRecord = Class.new(ApplicationRecord)` reads the previous binding before it assigns the new class.
+
+Rubydex keeps a separate lookup context for superclass references.
+For the binding under creation, it uses known binding completion positions in the same document.
+RBS declarations do not prove that a Ruby binding already exists.
+When conditional execution or unknown file order can change this lookup, Rubydex keeps the reference unresolved.
+Its ancestor chain remains partial instead of treating a guessed base as complete.
+
 ### Top-Level References with `::`
 
 Ruby's top-level constant resolution operator `::` resets the namespace to the root, but **lexical nesting is still preserved** for constant lookup. This is a critical and subtle behavior.
