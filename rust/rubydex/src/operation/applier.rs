@@ -161,6 +161,9 @@ impl OperationApplier {
             superclass_ref,
         );
         let def_id = self.local_graph.add_definition(Definition::Class(Box::new(def)));
+        if let Some(binding) = op.binding {
+            self.local_graph.add_binding_event(def_id, binding);
+        }
         self.add_member(lexical_nesting_id, def_id);
         self.scope_stack.push(ApplierScope::Namespace {
             definition_id: def_id,
@@ -180,6 +183,9 @@ impl OperationApplier {
             lexical_nesting_id,
         );
         let def_id = self.local_graph.add_definition(Definition::Module(Box::new(def)));
+        if let Some(binding) = op.binding {
+            self.local_graph.add_binding_event(def_id, binding);
+        }
         self.add_member(lexical_nesting_id, def_id);
         self.scope_stack.push(ApplierScope::Namespace {
             definition_id: def_id,
@@ -275,6 +281,7 @@ impl OperationApplier {
             lexical_nesting_id,
         );
         let def_id = self.local_graph.add_definition(Definition::Constant(Box::new(def)));
+        self.local_graph.add_binding_event(def_id, op.binding);
         self.add_member(lexical_nesting_id, def_id);
     }
 
@@ -292,6 +299,7 @@ impl OperationApplier {
         let def_id = self
             .local_graph
             .add_definition(Definition::ConstantAlias(Box::new(def)));
+        self.local_graph.add_binding_event(def_id, op.binding);
         self.add_member(lexical_nesting_id, def_id);
     }
 

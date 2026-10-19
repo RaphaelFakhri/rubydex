@@ -1,7 +1,7 @@
 //! Visit the Ruby AST and create the definitions.
 
 use crate::diagnostic::Rule;
-use crate::indexing::local_graph::LocalGraph;
+use crate::indexing::{BindingTracker, local_graph::LocalGraph};
 use crate::model::comment::Comment;
 use crate::model::definitions::{
     AttrAccessorDefinition, AttrReaderDefinition, AttrWriterDefinition, ClassDefinition, ClassVariableDefinition,
@@ -11,8 +11,8 @@ use crate::model::definitions::{
     ModuleDefinition, Parameter, ParameterStruct, PrependDefinition, Receiver, Signatures, SingletonClassDefinition,
 };
 use crate::model::document::Document;
-use crate::model::ids::{DefinitionId, NameId, StringId, UriId};
-use crate::model::name::ParentScope;
+use crate::model::ids::{DefinitionId, NameId, StringId, UriId, namespace_definition_id};
+use crate::model::name::{NameContext, ParentScope};
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::visibility::Visibility;
 use crate::offset::Offset;
@@ -89,6 +89,7 @@ pub struct RubyIndexer<'a> {
     nesting_stack: Vec<Nesting>,
     visibility_stack: Vec<VisibilityModifier>,
     pending_decorator_offset: Option<Offset>,
+    bindings: BindingTracker,
 }
 
 impl<'a> RubyIndexer<'a> {
@@ -105,6 +106,7 @@ impl<'a> RubyIndexer<'a> {
             nesting_stack: Vec::new(),
             visibility_stack: vec![VisibilityModifier::new(Visibility::Private, false, Offset::new(0, 0))],
             pending_decorator_offset: None,
+            bindings: BindingTracker::default(),
         }
     }
 
@@ -394,6 +396,15 @@ impl<'a> RubyIndexer<'a> {
     }
 
     fn index_constant_reference(&mut self, node: &ruby_prism::Node, push_final_reference: bool) -> Option<NameId> {
+        self.index_constant_reference_with_context(node, push_final_reference, NameContext::Default)
+    }
+
+    fn index_constant_reference_with_context(
+        &mut self,
+        node: &ruby_prism::Node,
+        push_final_reference: bool,
+        context: NameContext,
+    ) -> Option<NameId> {
         let mut parent_scope_id = ParentScope::None;
 
         let location = match node {
@@ -416,7 +427,7 @@ impl<'a> RubyIndexer<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -438,7 +449,7 @@ impl<'a> RubyIndexer<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -466,7 +477,7 @@ impl<'a> RubyIndexer<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -482,9 +493,12 @@ impl<'a> RubyIndexer<'a> {
         let offset = Offset::from_prism_location(&location);
         let name = Self::location_to_string(&location);
         let string_id = self.local_graph.intern_string(name);
-        let name_id = self
-            .local_graph
-            .add_name(string_id, parent_scope_id, self.current_lexical_scope_name_id());
+        let name_id = self.local_graph.add_name_with_context(
+            string_id,
+            parent_scope_id,
+            self.current_lexical_scope_name_id(),
+            context,
+        );
 
         if push_final_reference {
             self.local_graph
@@ -613,6 +627,10 @@ impl<'a> RubyIndexer<'a> {
             lexical_nesting_id,
         )));
         let definition_id = self.local_graph.add_definition(definition);
+        let binding = self
+            .bindings
+            .assignment_info(Offset::from_prism_location(&node.location()).end());
+        self.local_graph.add_binding_event(definition_id, binding);
 
         self.add_member_to_current_owner(definition_id);
 
@@ -630,43 +648,6 @@ impl<'a> RubyIndexer<'a> {
         let offset = Offset::from_prism_location(location);
         let (comments, flags) = self.find_comments_for(offset.start());
         let lexical_nesting_id = self.parent_lexical_scope_id();
-        let superclass = superclass_node.as_ref().and_then(|n| {
-            // Try direct constant reference first
-            if let Some(id) = self.index_constant_reference(n, false) {
-                return Some(self.local_graph.add_constant_reference(ConstantReference::new(
-                    id,
-                    self.uri_id,
-                    Offset::from_prism_location(&n.location()),
-                )));
-            }
-
-            // For call nodes (e.g. `ActiveRecord::Migration[7.0]`), try the receiver constant
-            if let ruby_prism::Node::CallNode { .. } = n {
-                let call = n.as_call_node().unwrap();
-                if let Some(receiver) = call.receiver()
-                    && let Some(id) = self.index_constant_reference(&receiver, false)
-                {
-                    return Some(self.local_graph.add_constant_reference(ConstantReference::new(
-                        id,
-                        self.uri_id,
-                        Offset::from_prism_location(&receiver.location()),
-                    )));
-                }
-            }
-
-            None
-        });
-
-        if let Some(superclass_node) = superclass_node
-            && superclass.is_none()
-        {
-            self.local_graph.add_diagnostic(
-                Rule::DynamicAncestor,
-                Offset::from_prism_location(&superclass_node.location()),
-                "Dynamic superclass".to_string(),
-            );
-        }
-
         let (name_id, name_offset) = if let Some(name_node) = name_node {
             let name_loc = match name_node {
                 ruby_prism::Node::ConstantPathNode { .. } => name_node.as_constant_path_node().unwrap().name_loc(),
@@ -689,6 +670,48 @@ impl<'a> RubyIndexer<'a> {
                 offset.clone(),
             )
         };
+        let context = name_id.map_or(NameContext::Default, |id| {
+            NameContext::Superclass(namespace_definition_id(self.uri_id, &offset, id))
+        });
+        let binding = self
+            .bindings
+            .namespace_info(location, name_node, superclass_node.as_ref());
+        let superclass = superclass_node.as_ref().and_then(|n| {
+            // Try direct constant reference first
+            if let Some(id) = self.index_constant_reference_with_context(n, false, context) {
+                return Some(self.local_graph.add_constant_reference(ConstantReference::new(
+                    id,
+                    self.uri_id,
+                    Offset::from_prism_location(&n.location()),
+                )));
+            }
+
+            // For call nodes (e.g. `ActiveRecord::Migration[7.0]`), try the receiver constant
+            if let ruby_prism::Node::CallNode { .. } = n {
+                let call = n.as_call_node().unwrap();
+                if let Some(receiver) = call.receiver()
+                    && let Some(id) = self.index_constant_reference_with_context(&receiver, false, context)
+                {
+                    return Some(self.local_graph.add_constant_reference(ConstantReference::new(
+                        id,
+                        self.uri_id,
+                        Offset::from_prism_location(&receiver.location()),
+                    )));
+                }
+            }
+
+            None
+        });
+
+        if let Some(superclass_node) = superclass_node
+            && superclass.is_none()
+        {
+            self.local_graph.add_diagnostic(
+                Rule::DynamicAncestor,
+                Offset::from_prism_location(&superclass_node.location()),
+                "Dynamic superclass".to_string(),
+            );
+        }
 
         if let Some(name_id) = name_id {
             let definition = Definition::Class(Box::new(ClassDefinition::new(
@@ -703,6 +726,9 @@ impl<'a> RubyIndexer<'a> {
             )));
 
             let definition_id = self.local_graph.add_definition(definition);
+            if let Some(binding) = binding {
+                self.local_graph.add_binding_event(definition_id, binding);
+            }
 
             self.add_member_to_current_lexical_scope(definition_id);
 
@@ -763,6 +789,9 @@ impl<'a> RubyIndexer<'a> {
             )));
 
             let definition_id = self.local_graph.add_definition(definition);
+            if let Some(binding) = self.bindings.namespace_info(location, name_node, None) {
+                self.local_graph.add_binding_event(definition_id, binding);
+            }
 
             self.add_member_to_current_lexical_scope(definition_id);
 
@@ -893,6 +922,10 @@ impl<'a> RubyIndexer<'a> {
         let definition =
             Definition::ConstantAlias(Box::new(ConstantAliasDefinition::new(target_name_id, alias_constant)));
         let definition_id = self.local_graph.add_definition(definition);
+        let binding = self
+            .bindings
+            .assignment_info(Offset::from_prism_location(&name_node.location()).end());
+        self.local_graph.add_binding_event(definition_id, binding);
 
         self.add_member_to_current_owner(definition_id);
 
@@ -1565,6 +1598,14 @@ impl CommentGroup {
 }
 
 impl Visit<'_> for RubyIndexer<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'_>) {
+        self.bindings.enter(&node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.bindings.leave();
+    }
+
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'_>) {
         self.handle_class_definition(
             &node.location(),

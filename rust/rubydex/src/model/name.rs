@@ -5,7 +5,7 @@ use crate::{
     model::{
         id::id_from_parts,
         identity_maps::IdentityHashMap,
-        ids::{DeclarationId, NameId, StringId},
+        ids::{DeclarationId, DefinitionId, NameId, StringId},
     },
 };
 
@@ -78,6 +78,14 @@ impl Display for ParentScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NameContext {
+    #[default]
+    Default,
+    Superclass(DefinitionId),
+}
+assert_mem_size!(NameContext, 8);
+
 #[derive(Debug, Clone, Eq)]
 pub struct Name {
     /// The unqualified name of the constant
@@ -93,15 +101,19 @@ pub struct Name {
     /// The ID of the name for the nesting where we found this name. This effectively turns the structure into a linked
     /// list of names to represent the nesting
     nesting: Option<NameId>,
+    context: NameContext,
     ref_count: u32,
     /// The depth of the name, which combines the depths of the parent scope and nesting
     depth: u16,
 }
-assert_mem_size!(Name, 40);
+assert_mem_size!(Name, 48);
 
 impl PartialEq for Name {
     fn eq(&self, other: &Self) -> bool {
-        self.str == other.str && self.parent_scope == other.parent_scope && self.nesting == other.nesting
+        self.str == other.str
+            && self.parent_scope == other.parent_scope
+            && self.nesting == other.nesting
+            && self.context == other.context
     }
 }
 
@@ -117,9 +129,21 @@ impl Name {
             str,
             parent_scope,
             nesting,
+            context: NameContext::Default,
             ref_count: 1,
             depth: Self::name_depth(names, parent_scope, nesting),
         }
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: NameContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    #[must_use]
+    pub fn context(&self) -> NameContext {
+        self.context
     }
 
     #[must_use]
@@ -170,7 +194,14 @@ impl Name {
             Some(id) => (1, id.get()),
         };
 
-        id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id)
+        match self.context {
+            NameContext::Default => {
+                id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id)
+            }
+            NameContext::Superclass(definition_id) => {
+                id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id, definition_id.get())
+            }
+        }
     }
 }
 
@@ -179,7 +210,7 @@ pub struct ResolvedName {
     name: Name,
     declaration_id: DeclarationId,
 }
-assert_mem_size!(ResolvedName, 48);
+assert_mem_size!(ResolvedName, 56);
 
 impl ResolvedName {
     #[must_use]
@@ -244,6 +275,14 @@ impl NameRef {
         match self {
             NameRef::Unresolved(name) => name.nesting(),
             NameRef::Resolved(resolved_name) => resolved_name.name.nesting(),
+        }
+    }
+
+    #[must_use]
+    pub fn context(&self) -> NameContext {
+        match self {
+            NameRef::Unresolved(name) => name.context(),
+            NameRef::Resolved(resolved_name) => resolved_name.name.context(),
         }
     }
 

@@ -33,6 +33,7 @@ pub mod ruby_builder;
 use crate::model::{
     comment::Comment,
     definitions::{DefinitionFlags, Signatures},
+    document::BindingInfo,
     ids::{NameId, StringId, UriId},
     visibility::Visibility,
 };
@@ -124,6 +125,7 @@ pub struct EnterClass {
     pub flags: DefinitionFlags,
     pub superclass_name: Option<NameId>,
     pub is_lexical_scope: bool,
+    pub binding: Option<BindingInfo>,
 }
 
 #[derive(Debug)]
@@ -135,6 +137,7 @@ pub struct EnterModule {
     pub comments: Box<[Comment]>,
     pub flags: DefinitionFlags,
     pub is_lexical_scope: bool,
+    pub binding: Option<BindingInfo>,
 }
 
 #[derive(Debug)]
@@ -193,6 +196,7 @@ pub struct DefineConstant {
     pub offset: Offset,
     pub comments: Box<[Comment]>,
     pub flags: DefinitionFlags,
+    pub binding: BindingInfo,
 }
 
 #[derive(Debug)]
@@ -203,6 +207,7 @@ pub struct AliasConstant {
     pub offset: Offset,
     pub comments: Box<[Comment]>,
     pub flags: DefinitionFlags,
+    pub binding: BindingInfo,
 }
 
 #[derive(Debug)]

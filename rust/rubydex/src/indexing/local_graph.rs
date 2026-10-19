@@ -2,11 +2,11 @@ use std::collections::hash_map::Entry;
 
 use crate::diagnostic::{Diagnostic, Rule};
 use crate::model::definitions::Definition;
-use crate::model::document::Document;
+use crate::model::document::{BindingInfo, Document};
 use crate::model::graph::NameDependent;
 use crate::model::identity_maps::IdentityHashMap;
 use crate::model::ids::{ConstantReferenceId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
-use crate::model::name::{Name, NameRef, ParentScope};
+use crate::model::name::{Name, NameContext, NameRef, ParentScope};
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
 use crate::offset::Offset;
@@ -71,6 +71,9 @@ impl LocalGraph {
         self.definitions.get_mut(&definition_id)
     }
 
+    /// # Panics
+    ///
+    /// Panics if a class superclass reference or one of its path names is missing.
     pub fn add_definition(&mut self, definition: Definition) -> DefinitionId {
         let definition_id = definition.id();
 
@@ -81,12 +84,37 @@ impl LocalGraph {
                 .push(NameDependent::Definition(definition_id));
         }
 
+        if let Definition::Class(class) = &definition
+            && let Some(reference_id) = class.superclass_ref()
+        {
+            let name_id = *self.constant_references.get(reference_id).unwrap().name_id();
+            self.name_dependents
+                .entry(name_id)
+                .or_default()
+                .push(NameDependent::SuperclassConsumer(definition_id));
+            let mut current = Some(name_id);
+            while let Some(id) = current {
+                let name = self.names.get(&id).unwrap();
+                if name.context() == NameContext::Superclass(definition_id) {
+                    self.name_dependents
+                        .entry(*class.name_id())
+                        .or_default()
+                        .push(NameDependent::SuperclassName(id));
+                }
+                current = name.parent_scope().as_ref().copied();
+            }
+        }
+
         if self.definitions.insert(definition_id, definition).is_some() {
             debug_assert!(false, "DefinitionId collision in local graph");
         }
 
         self.document.add_definition(definition_id);
         definition_id
+    }
+
+    pub fn add_binding_event(&mut self, definition_id: DefinitionId, info: BindingInfo) {
+        self.document.add_binding_event(definition_id, info);
     }
 
     // Strings
@@ -120,7 +148,17 @@ impl LocalGraph {
     }
 
     pub fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
-        let name = Name::new(&self.names, str, parent_scope, nesting);
+        self.add_name_with_context(str, parent_scope, nesting, NameContext::Default)
+    }
+
+    pub fn add_name_with_context(
+        &mut self,
+        str: StringId,
+        parent_scope: ParentScope,
+        nesting: Option<NameId>,
+        context: NameContext,
+    ) -> NameId {
+        let name = Name::new(&self.names, str, parent_scope, nesting).with_context(context);
         let name_id = name.id();
 
         match self.names.entry(name_id) {

@@ -141,10 +141,10 @@ offsets combination (i.e.: where they appeared in the code), names are unique ba
 
 ### Names
 
-Names are unique constant name structures that connect all of the pieces required to resolve them against the graph
-(implemented in `rust/rubydex/src/model/name.rs`). They contain the unqualified name of the constant (interned string),
-an optional parent scope (an ID to another name) and an optional nesting (an ID to another name). It is the connection
-of the 3 pieces that allows resolution to determine what a constant refers to.
+Names identify constant lookup structures in the graph
+(implemented in `rust/rubydex/src/model/name.rs`).
+Each name contains an interned string, an optional parent scope, an optional lexical nesting, and a lookup context.
+The default context retains the identity of ordinary names.
 
 For example:
 
@@ -157,6 +157,14 @@ module Foo
   end
 end
 ```
+
+Superclass references use `NameContext::Superclass(DefinitionId)`.
+The class definition keeps its default name, so its resolved declaration cannot replace the superclass lookup result.
+The definition ID uses the ordinary class name, URI, and source offset.
+It does not depend on the superclass reference.
+
+Each component of a superclass constant path uses that context.
+Its parent scope still determines whether lookup is lexical, qualified, or explicitly rooted.
 
 ## Phases
 
@@ -188,6 +196,17 @@ consider that there are no other files being analyzed:
 The key insight regarding this initial phase is that we can only capture document-specific data and any understanding
 that requires cross-file knowledge can only be derived once indexing is complete.
 
+Ruby indexing also records binding completion positions and whether source order is known.
+Keyword class and module bindings take effect before their bodies.
+Assignments take effect after their right-hand expressions finish.
+Both Ruby indexing implementations produce this information; RBS and synthetic namespaces do not.
+
+For superclass lookup, the resolver checks the binding under creation.
+An earlier ordered binding in the same document remains visible.
+Only the current binding and known later bindings are absent from the header view.
+Conditional execution and competing Ruby bindings in other documents leave that view unknown.
+This does not impose a load order on the graph.
+
 ### Resolution
 
 Resolution combines all of the data discovered during indexing to build a semantic representation of the codebase. The
@@ -216,6 +235,16 @@ the analysis.
 The purpose of the loop is to solve all of the work that has inverse dependencies. For example, resolving a constant may
 depend on another constant being resolved. After we're done, we have a separate step for processing definitions that
 have no inverse dependencies (like instance variables).
+
+Superclass dependencies connect each contextual name to the class binding it observes, even when lookup skips that binding.
+Binding changes clear those names and their dependent path components.
+Superclass reference changes also clear the consuming class's ancestors, descendants, and singleton hierarchy.
+This includes alias target changes that retain the same alias declaration ID.
+Deletion removes these non-owning edges without increasing name reference counts.
+
+Invalidation can add work during resolution.
+The resolver keeps reference work unique, ignores removed ancestor units, and defers ordinary definitions until convergence.
+When several references share one name, invalidation detaches every reference from the old declaration before it resolves them again.
 
 #### Important design and implementation note
 

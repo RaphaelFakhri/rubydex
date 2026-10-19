@@ -15,7 +15,7 @@ use crate::model::ids::{
     ConstantReferenceId, DeclarationId, DefinitionId, MethodReferenceId, NameId, StringId, UriId,
     declaration_id_from_lookup_name,
 };
-use crate::model::name::{Name, NameRef, ParentScope, ResolvedName};
+use crate::model::name::{Name, NameContext, NameRef, ParentScope, ResolvedName};
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
 use crate::model::visibility::Visibility;
@@ -32,6 +32,10 @@ pub enum NameDependent {
     ChildName(NameId),
     /// This name's `nesting` is the key name — reference-only dependency.
     NestedName(NameId),
+    /// A superclass lookup uses this class name to identify the binding being created.
+    SuperclassName(NameId),
+    /// Changes to this lookup require rebuilding the consuming class's ancestors.
+    SuperclassConsumer(DefinitionId),
 }
 assert_mem_size!(NameDependent, 16);
 
@@ -179,6 +183,10 @@ impl Graph {
                     Declaration::Namespace(Namespace::Todo(_)) => true,
                     _ => false,
                 });
+        let binding_changed = self
+            .declarations
+            .get(&declaration_id)
+            .is_some_and(|declaration| !declaration.definitions().contains(&definition_id));
 
         match self.declarations.entry(declaration_id) {
             Entry::Occupied(mut occupied_entry) => {
@@ -209,6 +217,16 @@ impl Graph {
                 let mut declaration = constructor(fully_qualified_name);
                 declaration.add_definition(definition_id);
                 vacant_entry.insert(declaration);
+            }
+        }
+        if binding_changed {
+            let seeds = self.names_for_declaration(declaration_id);
+            let mut queue = Vec::new();
+            for name_id in seeds {
+                self.queue_superclass_binding_change(name_id, &mut queue);
+            }
+            if !queue.is_empty() {
+                self.invalidate_graph(queue, IdentityHashMap::default());
             }
         }
 
@@ -717,6 +735,14 @@ impl Graph {
         std::mem::take(&mut self.pending_work)
     }
 
+    pub(crate) fn pending_work_len(&self) -> usize {
+        self.pending_work.len()
+    }
+
+    pub(crate) fn drain_work_from(&mut self, start: usize) -> impl Iterator<Item = Unit> + '_ {
+        self.pending_work.drain(start..)
+    }
+
     pub(crate) fn push_work(&mut self, unit: Unit) {
         self.pending_work.push(unit);
     }
@@ -738,24 +764,6 @@ impl Graph {
                 Some(declaration_id)
             }
             NameRef::Unresolved(_) => None,
-        }
-    }
-
-    /// Unresolves a constant reference: removes it from the target declaration's reference set
-    /// and unresolves its underlying name.
-    fn unresolve_reference(&mut self, reference_id: ConstantReferenceId) -> Option<DeclarationId> {
-        let constant_ref = self.constant_references.get(&reference_id)?;
-        let name_id = *constant_ref.name_id();
-
-        if let Some(old_decl_id) = self.unresolve_name(name_id) {
-            self.declarations
-                .get_mut(&old_decl_id)
-                .expect("Tried to unresolve reference for declaration that doesn't exist in the graph")
-                .remove_constant_reference(&reference_id);
-
-            Some(old_decl_id)
-        } else {
-            None
         }
     }
 
@@ -1096,6 +1104,23 @@ impl Graph {
     /// Removes raw document data (refs, defs, names, strings) from maps.
     /// Does not touch declarations or perform invalidation -- that is handled by `invalidate`.
     fn remove_document_data(&mut self, document: &Document) {
+        // Remove non-owning superclass dependencies before their reference names disappear.
+        for definition_id in document.definitions() {
+            let Some(Definition::Class(class)) = self.definitions.get(definition_id) else {
+                continue;
+            };
+            let Some(reference_id) = class.superclass_ref() else {
+                continue;
+            };
+            let class_name = *class.name_id();
+            let mut current = Some(*self.constant_references.get(reference_id).unwrap().name_id());
+            self.remove_name_dependent(current.unwrap(), NameDependent::SuperclassConsumer(*definition_id));
+            while let Some(name_id) = current {
+                let name = self.names.get(&name_id).unwrap();
+                current = name.parent_scope().as_ref().copied();
+                self.remove_name_dependent(class_name, NameDependent::SuperclassName(name_id));
+            }
+        }
         for ref_id in document.method_references() {
             if let Some(method_ref) = self.method_references.remove(ref_id) {
                 self.untrack_string(*method_ref.str());
@@ -1206,6 +1231,11 @@ impl Graph {
     ) {
         // Collect names before detaching — after detachment, definitions() may be empty
         let seed_names = self.names_for_declaration(decl_id);
+        if !detach_def_ids.is_empty() {
+            for name_id in &seed_names {
+                self.queue_superclass_binding_change(*name_id, queue);
+            }
+        }
 
         // Detach pending definitions before deciding the mode
         if let Some(decl) = self.declarations.get_mut(&decl_id) {
@@ -1237,6 +1267,7 @@ impl Graph {
             // files must be re-queued — their resolution path through this
             // declaration is broken and needs to be retried after re-add.
             for name_id in seed_names {
+                self.queue_superclass_consumers(name_id, queue);
                 self.unresolve_name(name_id);
                 self.queue_structural_cascade(name_id, queue);
 
@@ -1313,6 +1344,9 @@ impl Graph {
             namespace.for_each_descendant(|descendant_id| {
                 queue.push(InvalidationItem::Declaration(*descendant_id));
             });
+            if let Some(singleton_id) = namespace.singleton_class() {
+                queue.push(InvalidationItem::Declaration(*singleton_id));
+            }
 
             namespace.clear_ancestors();
             namespace.clear_descendants();
@@ -1330,6 +1364,7 @@ impl Graph {
     fn unresolve_dependent_name(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
         let dependents: Vec<NameDependent> = self.name_dependents.get(&name_id).cloned().unwrap_or_default();
         self.queue_structural_cascade(name_id, queue);
+        self.queue_superclass_consumers(name_id, queue);
 
         if let Some(old_decl_id) = self.unresolve_name(name_id) {
             for dep in &dependents {
@@ -1355,7 +1390,10 @@ impl Graph {
                             queue.push(InvalidationItem::Declaration(old_decl_id));
                         }
                     }
-                    NameDependent::ChildName(_) | NameDependent::NestedName(_) => {}
+                    NameDependent::ChildName(_)
+                    | NameDependent::NestedName(_)
+                    | NameDependent::SuperclassName(_)
+                    | NameDependent::SuperclassConsumer(_) => {}
                 }
             }
         }
@@ -1366,13 +1404,21 @@ impl Graph {
     fn unresolve_dependent_references(&mut self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
         let dependents: Vec<NameDependent> = self.name_dependents.get(&name_id).cloned().unwrap_or_default();
         self.queue_ancestor_triggered_invalidation(name_id, queue);
+        self.queue_superclass_consumers(name_id, queue);
 
-        let is_resolved = matches!(self.names.get(&name_id), Some(NameRef::Resolved(_)));
+        let mut old_declaration = None;
+        let mut invalidated = false;
 
         for dep in &dependents {
             if let NameDependent::Reference(ref_id) = dep {
-                if is_resolved {
-                    self.unresolve_reference(*ref_id);
+                if !invalidated {
+                    old_declaration = self.unresolve_name(name_id);
+                    invalidated = true;
+                }
+                if let Some(old_id) = old_declaration
+                    && let Some(declaration) = self.declarations.get_mut(&old_id)
+                {
+                    declaration.remove_constant_reference(ref_id);
                 }
                 self.push_work(Unit::ConstantRef(*ref_id));
             }
@@ -1385,10 +1431,14 @@ impl Graph {
         if let Some(deps) = self.name_dependents.get(&name_id) {
             for dep in deps {
                 match dep {
-                    NameDependent::ChildName(id) | NameDependent::NestedName(id) => {
+                    NameDependent::ChildName(id)
+                    | NameDependent::NestedName(id)
+                    | NameDependent::SuperclassName(id) => {
                         queue.push(InvalidationItem::Name(*id));
                     }
-                    NameDependent::Reference(_) | NameDependent::Definition(_) => {}
+                    NameDependent::Reference(_)
+                    | NameDependent::Definition(_)
+                    | NameDependent::SuperclassConsumer(_) => {}
                 }
             }
         }
@@ -1406,7 +1456,45 @@ impl Graph {
                     NameDependent::NestedName(id) => {
                         queue.push(InvalidationItem::References(*id));
                     }
-                    NameDependent::Reference(_) | NameDependent::Definition(_) => {}
+                    NameDependent::Reference(_)
+                    | NameDependent::Definition(_)
+                    | NameDependent::SuperclassName(_)
+                    | NameDependent::SuperclassConsumer(_) => {}
+                }
+            }
+        }
+    }
+
+    fn queue_superclass_binding_change(&self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        self.queue_superclass_consumers(name_id, queue);
+        if let Some(name @ NameRef::Resolved(_)) = self.names.get(&name_id)
+            && matches!(name.context(), NameContext::Superclass(_))
+        {
+            queue.push(InvalidationItem::Name(name_id));
+        }
+        if let Some(dependents) = self.name_dependents.get(&name_id) {
+            for dependent in dependents {
+                if let NameDependent::SuperclassName(id) = dependent
+                    && matches!(self.names.get(id), Some(NameRef::Resolved(_)))
+                {
+                    queue.push(InvalidationItem::Name(*id));
+                }
+            }
+        }
+    }
+
+    fn queue_superclass_consumers(&self, name_id: NameId, queue: &mut Vec<InvalidationItem>) {
+        if let Some(dependents) = self.name_dependents.get(&name_id) {
+            for dependent in dependents {
+                if let NameDependent::SuperclassConsumer(definition_id) = dependent
+                    && let Some(declaration_id) = self.definition_id_to_declaration_id(*definition_id)
+                    && self
+                        .declarations
+                        .get(declaration_id)
+                        .and_then(Declaration::as_namespace)
+                        .is_some_and(Namespace::has_complete_ancestors)
+                {
+                    queue.push(InvalidationItem::Declaration(*declaration_id));
                 }
             }
         }
