@@ -196,6 +196,11 @@ consider that there are no other files being analyzed:
 The key insight regarding this initial phase is that we can only capture document-specific data and any understanding
 that requires cross-file knowledge can only be derived once indexing is complete.
 
+Ruby indexing also records binding completion positions and whether source order is known.
+Keyword class and module bindings take effect before their bodies.
+Assignments take effect after their right-hand expressions finish.
+Both Ruby indexing implementations produce this information; RBS and synthetic namespaces do not.
+
 ### Resolution
 
 Resolution combines all of the data discovered during indexing to build a semantic representation of the codebase. The

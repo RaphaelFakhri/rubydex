@@ -6,7 +6,15 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::assert_mem_size;
 use crate::diagnostic::Diagnostic;
+use crate::model::identity_maps::IdentityHashMap;
 use crate::model::ids::{ConstantReferenceId, DefinitionId, MethodReferenceId};
+
+#[derive(Debug, Clone, Copy)]
+pub struct BindingInfo {
+    pub effect_offset: u32,
+    pub ordered: bool,
+}
+assert_mem_size!(BindingInfo, 8);
 
 // Represents a document currently loaded into memory. Identified by its unique URI, it holds the edges to all
 // definitions and references discovered in it
@@ -18,9 +26,10 @@ pub struct Document {
     method_reference_ids: Vec<MethodReferenceId>,
     constant_reference_ids: Vec<ConstantReferenceId>,
     diagnostics: Vec<Diagnostic>,
+    binding_events: IdentityHashMap<DefinitionId, BindingInfo>,
     content_hash: u64,
 }
-assert_mem_size!(Document, 176);
+assert_mem_size!(Document, 208);
 
 impl Document {
     #[must_use]
@@ -32,6 +41,7 @@ impl Document {
             method_reference_ids: Vec::new(),
             constant_reference_ids: Vec::new(),
             diagnostics: Vec::new(),
+            binding_events: IdentityHashMap::default(),
             content_hash: xxh3_64(source.as_bytes()),
         }
     }
@@ -63,6 +73,15 @@ impl Document {
         );
 
         self.definition_ids.push(definition_id);
+    }
+
+    pub fn add_binding_event(&mut self, definition_id: DefinitionId, info: BindingInfo) {
+        self.binding_events.insert(definition_id, info);
+    }
+
+    #[must_use]
+    pub fn binding_event(&self, definition_id: DefinitionId) -> Option<&BindingInfo> {
+        self.binding_events.get(&definition_id)
     }
 
     #[must_use]

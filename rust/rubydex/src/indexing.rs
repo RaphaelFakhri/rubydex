@@ -22,6 +22,110 @@ pub enum IndexerBackend {
     OperationBuilder,
 }
 
+#[derive(Default)]
+pub(crate) struct BindingTracker {
+    frames: Vec<BindingFrame>,
+}
+
+struct BindingFrame {
+    ordered: bool,
+    assignment_end: Option<u32>,
+}
+
+impl BindingTracker {
+    pub(crate) fn enter(&mut self, node: &ruby_prism::Node<'_>) {
+        use ruby_prism::Node;
+        let uncertain = matches!(
+            node,
+            Node::IfNode { .. }
+                | Node::UnlessNode { .. }
+                | Node::CaseNode { .. }
+                | Node::CaseMatchNode { .. }
+                | Node::WhileNode { .. }
+                | Node::UntilNode { .. }
+                | Node::ForNode { .. }
+                | Node::RescueNode { .. }
+                | Node::RescueModifierNode { .. }
+                | Node::EnsureNode { .. }
+                | Node::BlockNode { .. }
+                | Node::LambdaNode { .. }
+                | Node::DefNode { .. }
+                | Node::PostExecutionNode { .. }
+                | Node::PreExecutionNode { .. }
+                | Node::DefinedNode { .. }
+                | Node::AndNode { .. }
+                | Node::OrNode { .. }
+                | Node::ConstantOrWriteNode { .. }
+                | Node::ConstantAndWriteNode { .. }
+                | Node::ConstantPathOrWriteNode { .. }
+                | Node::ConstantPathAndWriteNode { .. }
+        ) || node
+            .as_begin_node()
+            .is_some_and(|node| node.rescue_clause().is_some() || node.ensure_clause().is_some());
+        let assignment = matches!(
+            node,
+            Node::ConstantWriteNode { .. }
+                | Node::ConstantOrWriteNode { .. }
+                | Node::ConstantAndWriteNode { .. }
+                | Node::ConstantOperatorWriteNode { .. }
+                | Node::ConstantPathWriteNode { .. }
+                | Node::ConstantPathOrWriteNode { .. }
+                | Node::ConstantPathAndWriteNode { .. }
+                | Node::ConstantPathOperatorWriteNode { .. }
+                | Node::MultiWriteNode { .. }
+        );
+        let previous = self.frames.last();
+        self.frames.push(BindingFrame {
+            ordered: !uncertain && previous.is_none_or(|frame| frame.ordered),
+            assignment_end: if assignment {
+                Some(crate::offset::Offset::from_prism_location(&node.location()).end())
+            } else {
+                previous.and_then(|frame| frame.assignment_end)
+            },
+        });
+    }
+
+    pub(crate) fn leave(&mut self) {
+        self.frames.pop();
+    }
+
+    pub(crate) fn info(&self, effect_offset: u32) -> crate::model::document::BindingInfo {
+        crate::model::document::BindingInfo {
+            effect_offset,
+            ordered: self.frames.last().is_none_or(|frame| frame.ordered),
+        }
+    }
+
+    pub(crate) fn assignment_info(&self, fallback_end: u32) -> crate::model::document::BindingInfo {
+        self.info(
+            self.frames
+                .last()
+                .and_then(|frame| frame.assignment_end)
+                .unwrap_or(fallback_end),
+        )
+    }
+
+    pub(crate) fn namespace_info(
+        &self,
+        location: &ruby_prism::Location<'_>,
+        name: Option<&ruby_prism::Node<'_>>,
+        superclass: Option<&ruby_prism::Node<'_>>,
+    ) -> Option<crate::model::document::BindingInfo> {
+        name.map(|name| {
+            let effect_offset = if matches!(
+                name,
+                ruby_prism::Node::ConstantWriteNode { .. } | ruby_prism::Node::ConstantPathWriteNode { .. }
+            ) {
+                crate::offset::Offset::from_prism_location(location).end()
+            } else {
+                let header_end = superclass.map_or_else(|| name.location(), ruby_prism::Node::location);
+                crate::offset::Offset::from_prism_location(&header_end).end()
+            };
+            self.info(effect_offset)
+        })
+    }
+}
+
 /// The language of a source document, used to dispatch to the appropriate indexer
 pub enum LanguageId {
     Ruby,

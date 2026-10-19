@@ -6,6 +6,7 @@
 use std::collections::hash_map::Entry;
 
 use crate::diagnostic::{Diagnostic, Rule};
+use crate::indexing::BindingTracker;
 use crate::model::comment::Comment;
 use crate::model::definitions::{DefinitionFlags, Parameter, ParameterStruct, Signatures};
 use crate::model::document::Document;
@@ -81,6 +82,7 @@ pub struct RubyOperationBuilder<'a> {
     nesting_stack: Vec<Nesting>,
     visibility_stack: Vec<VisibilityModifier>,
     pending_decorator_offset: Option<Offset>,
+    bindings: BindingTracker,
     // Output
     operations: Vec<Operation>,
 }
@@ -101,6 +103,7 @@ impl<'a> RubyOperationBuilder<'a> {
             visibility_stack: vec![VisibilityModifier::new(Visibility::Private, false, Offset::new(0, 0))],
             pending_decorator_offset: None,
             operations: Vec::new(),
+            bindings: BindingTracker::default(),
         }
     }
 
@@ -676,6 +679,9 @@ impl<'a> RubyOperationBuilder<'a> {
         let context = name_id.map_or(NameContext::Default, |id| {
             NameContext::Superclass(namespace_definition_id(self.uri_id, &offset, id))
         });
+        let binding = self
+            .bindings
+            .namespace_info(location, name_node, superclass_node.as_ref());
         let superclass_name = superclass_node.as_ref().and_then(|n| {
             if let Some(id) = self.index_constant_reference_with_context(n, false, context) {
                 self.operations
@@ -725,6 +731,7 @@ impl<'a> RubyOperationBuilder<'a> {
                 flags,
                 superclass_name,
                 is_lexical_scope,
+                binding,
             }));
 
             let nesting = if is_lexical_scope {
@@ -786,6 +793,7 @@ impl<'a> RubyOperationBuilder<'a> {
                 comments,
                 flags,
                 is_lexical_scope,
+                binding: self.bindings.namespace_info(location, name_node, None),
             }));
 
             let nesting = if is_lexical_scope {
@@ -990,6 +998,9 @@ impl<'a> RubyOperationBuilder<'a> {
             offset,
             comments,
             flags,
+            binding: self
+                .bindings
+                .assignment_info(Offset::from_prism_location(&node.location()).end()),
         }));
 
         Some(())
@@ -1052,6 +1063,9 @@ impl<'a> RubyOperationBuilder<'a> {
             uri_id: self.uri_id,
             offset,
             comments,
+            binding: self
+                .bindings
+                .assignment_info(Offset::from_prism_location(&name_node.location()).end()),
             flags,
         }));
 
@@ -1442,6 +1456,14 @@ impl CommentGroup {
 // -- Visit implementation --
 
 impl Visit<'_> for RubyOperationBuilder<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'_>) {
+        self.bindings.enter(&node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.bindings.leave();
+    }
+
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'_>) {
         self.handle_class_definition(
             &node.location(),

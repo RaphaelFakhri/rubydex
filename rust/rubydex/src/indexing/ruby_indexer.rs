@@ -1,7 +1,7 @@
 //! Visit the Ruby AST and create the definitions.
 
 use crate::diagnostic::Rule;
-use crate::indexing::local_graph::LocalGraph;
+use crate::indexing::{BindingTracker, local_graph::LocalGraph};
 use crate::model::comment::Comment;
 use crate::model::definitions::{
     AttrAccessorDefinition, AttrReaderDefinition, AttrWriterDefinition, ClassDefinition, ClassVariableDefinition,
@@ -89,6 +89,7 @@ pub struct RubyIndexer<'a> {
     nesting_stack: Vec<Nesting>,
     visibility_stack: Vec<VisibilityModifier>,
     pending_decorator_offset: Option<Offset>,
+    bindings: BindingTracker,
 }
 
 impl<'a> RubyIndexer<'a> {
@@ -105,6 +106,7 @@ impl<'a> RubyIndexer<'a> {
             nesting_stack: Vec::new(),
             visibility_stack: vec![VisibilityModifier::new(Visibility::Private, false, Offset::new(0, 0))],
             pending_decorator_offset: None,
+            bindings: BindingTracker::default(),
         }
     }
 
@@ -625,6 +627,10 @@ impl<'a> RubyIndexer<'a> {
             lexical_nesting_id,
         )));
         let definition_id = self.local_graph.add_definition(definition);
+        let binding = self
+            .bindings
+            .assignment_info(Offset::from_prism_location(&node.location()).end());
+        self.local_graph.add_binding_event(definition_id, binding);
 
         self.add_member_to_current_owner(definition_id);
 
@@ -667,6 +673,9 @@ impl<'a> RubyIndexer<'a> {
         let context = name_id.map_or(NameContext::Default, |id| {
             NameContext::Superclass(namespace_definition_id(self.uri_id, &offset, id))
         });
+        let binding = self
+            .bindings
+            .namespace_info(location, name_node, superclass_node.as_ref());
         let superclass = superclass_node.as_ref().and_then(|n| {
             // Try direct constant reference first
             if let Some(id) = self.index_constant_reference_with_context(n, false, context) {
@@ -717,6 +726,9 @@ impl<'a> RubyIndexer<'a> {
             )));
 
             let definition_id = self.local_graph.add_definition(definition);
+            if let Some(binding) = binding {
+                self.local_graph.add_binding_event(definition_id, binding);
+            }
 
             self.add_member_to_current_lexical_scope(definition_id);
 
@@ -777,6 +789,9 @@ impl<'a> RubyIndexer<'a> {
             )));
 
             let definition_id = self.local_graph.add_definition(definition);
+            if let Some(binding) = self.bindings.namespace_info(location, name_node, None) {
+                self.local_graph.add_binding_event(definition_id, binding);
+            }
 
             self.add_member_to_current_lexical_scope(definition_id);
 
@@ -907,6 +922,10 @@ impl<'a> RubyIndexer<'a> {
         let definition =
             Definition::ConstantAlias(Box::new(ConstantAliasDefinition::new(target_name_id, alias_constant)));
         let definition_id = self.local_graph.add_definition(definition);
+        let binding = self
+            .bindings
+            .assignment_info(Offset::from_prism_location(&name_node.location()).end());
+        self.local_graph.add_binding_event(definition_id, binding);
 
         self.add_member_to_current_owner(definition_id);
 
@@ -1579,6 +1598,14 @@ impl CommentGroup {
 }
 
 impl Visit<'_> for RubyIndexer<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'_>) {
+        self.bindings.enter(&node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.bindings.leave();
+    }
+
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'_>) {
         self.handle_class_definition(
             &node.location(),

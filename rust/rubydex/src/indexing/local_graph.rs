@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 
 use crate::diagnostic::{Diagnostic, Rule};
 use crate::model::definitions::Definition;
-use crate::model::document::Document;
+use crate::model::document::{BindingInfo, Document};
 use crate::model::graph::NameDependent;
 use crate::model::identity_maps::IdentityHashMap;
 use crate::model::ids::{ConstantReferenceId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
@@ -100,6 +100,10 @@ impl LocalGraph {
 
         self.document.add_definition(definition_id);
         definition_id
+    }
+
+    pub fn add_binding_event(&mut self, definition_id: DefinitionId, info: BindingInfo) {
+        self.document.add_binding_event(definition_id, info);
     }
 
     // Strings
