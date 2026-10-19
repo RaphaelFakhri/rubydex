@@ -1475,10 +1475,20 @@ impl<'a> Resolver<'a> {
             NameRef::Resolved(resolved) => return Outcome::Resolved(*resolved.declaration_id()),
             NameRef::Unresolved(name) => name.as_ref().clone(),
         };
+        let excluded = if let Some(defining_name) = name.excluded_name_id() {
+            let Some(NameRef::Resolved(defining_name)) = self.graph.names().get(&defining_name) else {
+                return Outcome::Retry {
+                    partial_ancestors: false,
+                };
+            };
+            Some(*defining_name.declaration_id())
+        } else {
+            None
+        };
 
         match name.parent_scope() {
             ParentScope::TopLevel => {
-                let result = self.search_ancestors(*OBJECT_ID, *name.str());
+                let result = self.search_ancestors(*OBJECT_ID, *name.str(), excluded);
 
                 if let Outcome::Resolved(declaration_id) = result {
                     self.graph.record_resolved_name(name_id, declaration_id);
@@ -1534,7 +1544,7 @@ impl<'a> Resolver<'a> {
             }
             ParentScope::None => {
                 // Otherwise, it's a simple constant read and we can resolve it directly
-                let result = self.run_resolution(&name);
+                let result = self.run_resolution(&name, excluded);
 
                 if let Outcome::Resolved(declaration_id) = result {
                     self.graph.record_resolved_name(name_id, declaration_id);
@@ -1568,7 +1578,7 @@ impl<'a> Resolver<'a> {
                         Some(Declaration::Namespace(_)) => {
                             found_namespace = true;
 
-                            match self.search_ancestors(id, *name.str()) {
+                            match self.search_ancestors(id, *name.str(), excluded) {
                                 Outcome::Resolved(declaration_id) => {
                                     self.graph.record_resolved_name(name_id, declaration_id);
                                     return Outcome::Resolved(declaration_id);
@@ -1662,11 +1672,11 @@ impl<'a> Resolver<'a> {
         results
     }
 
-    fn run_resolution(&mut self, name: &Name) -> Outcome {
+    fn run_resolution(&mut self, name: &Name, excluded: Option<DeclarationId>) -> Outcome {
         let str_id = *name.str();
 
         if let Some(nesting) = name.nesting() {
-            let scope_outcome = self.search_lexical_scopes(name, str_id);
+            let scope_outcome = self.search_lexical_scopes(name, str_id, excluded);
 
             // If we already resolved or need to retry, return early
             if scope_outcome.is_resolved_or_retry() {
@@ -1689,7 +1699,7 @@ impl<'a> Resolver<'a> {
                             }
                             Some(Declaration::Namespace(_)) => {
                                 decl_id = Some(id);
-                                result = self.search_ancestors(id, str_id);
+                                result = self.search_ancestors(id, str_id, excluded);
                                 break;
                             }
                             _ => {}
@@ -1726,7 +1736,7 @@ impl<'a> Resolver<'a> {
             );
 
             if is_module || chain_incomplete {
-                let object_outcome = self.search_ancestors(*OBJECT_ID, str_id);
+                let object_outcome = self.search_ancestors(*OBJECT_ID, str_id, excluded);
 
                 match object_outcome {
                     // Found the constant through Object's ancestors.
@@ -1744,11 +1754,16 @@ impl<'a> Resolver<'a> {
         // When there's no nesting, we're working at the top level of a script. The top level is the magic `<main>`
         // object, which is an instance of `Object`. To resolve constants at the top level, we need to search the
         // ancestors of `Object`
-        self.search_ancestors(*OBJECT_ID, str_id)
+        self.search_ancestors(*OBJECT_ID, str_id, excluded)
     }
 
     /// Search for a member in a declaration's ancestor chain.
-    fn search_ancestors(&mut self, declaration_id: DeclarationId, str_id: StringId) -> Outcome {
+    fn search_ancestors(
+        &mut self,
+        declaration_id: DeclarationId,
+        str_id: StringId,
+        excluded: Option<DeclarationId>,
+    ) -> Outcome {
         match self.linearize_ancestors(declaration_id) {
             Ancestors::Complete(ids) | Ancestors::Cyclic(ids) => ids
                 .iter()
@@ -1761,6 +1776,7 @@ impl<'a> Resolver<'a> {
                             .as_namespace()
                             .unwrap()
                             .member(&str_id)
+                            .filter(|id| Some(**id) != excluded)
                             .map(|id| Outcome::Resolved(*id))
                     } else {
                         None
@@ -1788,6 +1804,7 @@ impl<'a> Resolver<'a> {
                                 .as_namespace()
                                 .unwrap()
                                 .member(&str_id)
+                                .filter(|id| Some(**id) != excluded)
                             {
                                 return Outcome::Resolved(*id);
                             }
@@ -1802,7 +1819,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Look for the constant in the lexical scopes that are a part of its nesting
-    fn search_lexical_scopes(&self, name: &Name, str_id: StringId) -> Outcome {
+    fn search_lexical_scopes(&self, name: &Name, str_id: StringId, excluded: Option<DeclarationId>) -> Outcome {
         let mut current_name = name;
 
         while let Some(nesting_id) = current_name.nesting() {
@@ -1812,6 +1829,7 @@ impl<'a> Resolver<'a> {
                 if let Some(namespace_id) = self.resolve_to_namespace(declaration_id)
                     && let Some(namespace) = self.graph.declarations().get(&namespace_id).unwrap().as_namespace()
                     && let Some(member) = namespace.member(&str_id)
+                    && Some(*member) != excluded
                 {
                     return Outcome::Resolved(*member);
                 }

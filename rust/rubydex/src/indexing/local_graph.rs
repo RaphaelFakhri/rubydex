@@ -121,7 +121,23 @@ impl LocalGraph {
 
     pub fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
         let name = Name::new(&self.names, str, parent_scope, nesting);
+        self.insert_name(name)
+    }
+
+    pub fn add_namesake_superclass_name(
+        &mut self,
+        str: StringId,
+        parent_scope: ParentScope,
+        nesting: Option<NameId>,
+    ) -> NameId {
+        let name = Name::new(&self.names, str, parent_scope, nesting).for_namesake_superclass();
+        self.insert_name(name)
+    }
+
+    fn insert_name(&mut self, name: Name) -> NameId {
         let name_id = name.id();
+        let parent_scope = *name.parent_scope();
+        let nesting = *name.nesting();
 
         match self.names.entry(name_id) {
             Entry::Occupied(mut entry) => {

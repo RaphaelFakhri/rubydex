@@ -156,6 +156,20 @@ impl<'a> RubyOperationBuilder<'a> {
 
     fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
         let name = Name::new(&self.names, str, parent_scope, nesting);
+        self.insert_name(name)
+    }
+
+    fn add_namesake_superclass_name(
+        &mut self,
+        str: StringId,
+        parent_scope: ParentScope,
+        nesting: Option<NameId>,
+    ) -> NameId {
+        let name = Name::new(&self.names, str, parent_scope, nesting).for_namesake_superclass();
+        self.insert_name(name)
+    }
+
+    fn insert_name(&mut self, name: Name) -> NameId {
         let name_id = name.id();
 
         match self.names.entry(name_id) {
@@ -276,6 +290,15 @@ impl<'a> RubyOperationBuilder<'a> {
     }
 
     fn index_constant_reference(&mut self, node: &ruby_prism::Node, push_final_reference: bool) -> Option<NameId> {
+        self.index_constant_reference_with_role(node, push_final_reference, false)
+    }
+
+    fn index_constant_reference_with_role(
+        &mut self,
+        node: &ruby_prism::Node,
+        push_final_reference: bool,
+        namesake_superclass: bool,
+    ) -> Option<NameId> {
         let mut parent_scope_id = ParentScope::None;
 
         let location = match node {
@@ -361,7 +384,12 @@ impl<'a> RubyOperationBuilder<'a> {
         let offset = Offset::from_prism_location(&location);
         let name = Self::location_to_string(&location);
         let string_id = self.intern_string(name);
-        let name_id = self.add_name(string_id, parent_scope_id, self.current_lexical_scope_name_id());
+        let nesting = self.current_lexical_scope_name_id();
+        let name_id = if namesake_superclass {
+            self.add_namesake_superclass_name(string_id, parent_scope_id, nesting)
+        } else {
+            self.add_name(string_id, parent_scope_id, nesting)
+        };
 
         if push_final_reference {
             self.operations
@@ -633,8 +661,15 @@ impl<'a> RubyOperationBuilder<'a> {
     ) {
         let offset = Offset::from_prism_location(location);
         let (comments, flags) = self.find_comments_for(offset.start());
+        let namesake_superclass = name_node.is_some_and(|name| {
+            name.as_constant_read_node().is_some()
+                && superclass_node.as_ref().is_some_and(|superclass| {
+                    superclass.as_constant_read_node().is_some()
+                        && name.location().as_slice() == superclass.location().as_slice()
+                })
+        });
         let superclass_name = superclass_node.as_ref().and_then(|n| {
-            if let Some(id) = self.index_constant_reference(n, false) {
+            if let Some(id) = self.index_constant_reference_with_role(n, false, namesake_superclass) {
                 self.operations
                     .push(Operation::ReferenceConstant(op::ReferenceConstant {
                         name_id: id,

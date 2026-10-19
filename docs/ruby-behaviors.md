@@ -110,6 +110,23 @@ end
 2. Otherwise, the name is qualified relative to the current namespace
 3. At the top level, unqualified names remain unqualified
 
+### Same-Name Superclasses
+
+Ruby evaluates the superclass expression before it binds the new class.
+
+```ruby
+class ApplicationRecord; end
+
+module GSD
+  class ApplicationRecord < ApplicationRecord; end
+end
+```
+
+The superclass is `::ApplicationRecord`, not `GSD::ApplicationRecord`.
+References inside the class body can still select `GSD::ApplicationRecord`.
+Rubydex keeps the superclass read separate from the defining name's cached result.
+It preserves the enclosing lexical nesting and skips the class under definition during that lookup.
+
 ### Top-Level References with `::`
 
 Ruby's top-level constant resolution operator `::` resets the namespace to the root, but **lexical nesting is still preserved** for constant lookup. This is a critical and subtle behavior.

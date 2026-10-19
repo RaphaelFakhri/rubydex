@@ -982,6 +982,93 @@ mod superclass_tests {
     use super::*;
 
     #[test]
+    fn namesake_superclass_keeps_definition_and_body_lookup_separate() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///namesake.rb",
+            "class C\n  TOKEN = 1\nend\nmodule M\n  class C < C\n    C\n    TOKEN\n  end\n  class C; end\nend",
+        );
+        context.resolve();
+
+        assert_constant_reference_to!(context, "C", "file:///namesake.rb:5:13-5:14");
+        assert_constant_reference_to!(context, "M::C", "file:///namesake.rb:6:5-6:6");
+        assert_constant_reference_to!(context, "C::TOKEN", "file:///namesake.rb:7:5-7:10");
+        assert_ancestors_eq!(context, "M::C", ["M::C", "C", "Object", "Kernel", "BasicObject"]);
+    }
+
+    #[test]
+    fn namesake_superclass_selects_nearest_enclosing_scope() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///lexical.rb",
+            "class C; end\nmodule Outer\n  class C; end\n  module Inner\n    class C < C; end\n  end\nend",
+        );
+        context.resolve();
+
+        assert_constant_reference_to!(context, "Outer::C", "file:///lexical.rb:5:15-5:16");
+        assert_ancestors_eq!(
+            context,
+            "Outer::Inner::C",
+            ["Outer::Inner::C", "Outer::C", "Object", "Kernel", "BasicObject"]
+        );
+    }
+
+    #[test]
+    fn namesake_superclass_searches_the_enclosing_class_ancestors() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///inherited.rb",
+            "class Base\n  class C; end\nend\nclass Container < Base\n  class C < C; end\nend",
+        );
+        context.resolve();
+
+        assert_constant_reference_to!(context, "Base::C", "file:///inherited.rb:5:13-5:14");
+        assert_ancestors_eq!(
+            context,
+            "Container::C",
+            ["Container::C", "Base::C", "Object", "Kernel", "BasicObject"]
+        );
+    }
+
+    #[test]
+    fn qualified_and_constructor_superclasses_keep_existing_lookup() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///controls.rb",
+            "class Base; end\nclass C; end\nmodule M\n  class C < Base\n    Parent = Base\n  end\n  class C < C::Parent; end\n  C = Class.new(C)\nend\nmodule N\n  class C < ::C; end\nend",
+        );
+        context.resolve();
+
+        assert_constant_reference_to!(context, "M::C::Parent", "file:///controls.rb:7:13-7:22");
+        assert_constant_reference_to!(context, "M::C", "file:///controls.rb:8:17-8:18");
+        assert_constant_reference_to!(context, "C", "file:///controls.rb:11:13-11:16");
+    }
+
+    #[test]
+    fn namesake_superclass_recovers_after_base_deletion_and_reindex() {
+        let mut context = graph_test();
+        let base = "class C\n  TOKEN = 1\nend";
+        context.index_uri("file:///base.rb", base);
+        context.index_uri(
+            "file:///child.rb",
+            "module M\n  class C < C\n    C\n    TOKEN\n  end\nend",
+        );
+        context.resolve();
+        assert_constant_reference_to!(context, "C", "file:///child.rb:2:13-2:14");
+
+        context.delete_uri("file:///base.rb");
+        context.resolve();
+        assert_constant_reference_unresolved!(context, "C", "file:///child.rb:2:13-2:14");
+        assert_constant_reference_to!(context, "M::C", "file:///child.rb:3:5-3:6");
+
+        context.index_uri("file:///base.rb", base);
+        context.resolve();
+        assert_constant_reference_to!(context, "C", "file:///child.rb:2:13-2:14");
+        assert_constant_reference_to!(context, "C::TOKEN", "file:///child.rb:4:5-4:10");
+        assert_ancestors_eq!(context, "M::C", ["M::C", "C", "Object", "Kernel", "BasicObject"]);
+    }
+
+    #[test]
     fn linearizing_super_classes() {
         let mut context = graph_test();
         context.index_uri("file:///foo.rb", {

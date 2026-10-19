@@ -158,6 +158,12 @@ module Foo
 end
 ```
 
+A matching pair of unqualified class and superclass names needs two cached results.
+The defining name resolves to the class declaration. The superclass read must not select that declaration.
+A cache-role flag separates those names without changing their lexical nesting or increasing the `Name` size.
+Superclass resolution excludes the defining declaration, then uses the existing lexical and ancestor lookup order.
+Other superclass expressions keep their existing lookup rules.
+
 ## Phases
 
 ### Indexing

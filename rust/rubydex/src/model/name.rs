@@ -96,12 +96,17 @@ pub struct Name {
     ref_count: u32,
     /// The depth of the name, which combines the depths of the parent scope and nesting
     depth: u16,
+    /// Separates a same-name superclass read from the class definition's cached name.
+    is_namesake_superclass: bool,
 }
 assert_mem_size!(Name, 40);
 
 impl PartialEq for Name {
     fn eq(&self, other: &Self) -> bool {
-        self.str == other.str && self.parent_scope == other.parent_scope && self.nesting == other.nesting
+        self.str == other.str
+            && self.parent_scope == other.parent_scope
+            && self.nesting == other.nesting
+            && self.is_namesake_superclass == other.is_namesake_superclass
     }
 }
 
@@ -119,7 +124,19 @@ impl Name {
             nesting,
             ref_count: 1,
             depth: Self::name_depth(names, parent_scope, nesting),
+            is_namesake_superclass: false,
         }
+    }
+
+    #[must_use]
+    pub fn for_namesake_superclass(mut self) -> Self {
+        self.is_namesake_superclass = true;
+        self
+    }
+
+    #[must_use]
+    pub fn excluded_name_id(&self) -> Option<NameId> {
+        self.is_namesake_superclass.then(|| self.cache_key(false))
     }
 
     #[must_use]
@@ -158,6 +175,10 @@ impl Name {
 
     #[must_use]
     pub fn id(&self) -> NameId {
+        self.cache_key(self.is_namesake_superclass)
+    }
+
+    fn cache_key(&self, namesake_superclass: bool) -> NameId {
         // We need to include both the variant and the bytes of the parent scope when present
         let (parent_tag, parent_id): (u8, u64) = match self.parent_scope {
             ParentScope::None => (0, 0),
@@ -170,7 +191,11 @@ impl Name {
             Some(id) => (1, id.get()),
         };
 
-        id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id)
+        if namesake_superclass {
+            id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id, 1_u8)
+        } else {
+            id_from_parts!(NameId; self.str.get(), parent_tag, parent_id, nesting_tag, nesting_id)
+        }
     }
 }
 
