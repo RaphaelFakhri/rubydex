@@ -978,6 +978,54 @@ mod constant_alias_tests {
     }
 }
 
+mod superclass_binding_tests {
+    use super::*;
+
+    #[test]
+    fn alias_retarget_rebuilds_consumers_and_singletons() {
+        let mut context = graph_test();
+        context.index_uri(
+            "file:///bases.rb",
+            "class BaseOne\n  TOKEN = 1\nend\nclass BaseTwo\n  TOKEN = 2\nend",
+        );
+        context.index_uri("file:///alias.rb", "Parent = BaseOne");
+        context.index_uri("file:///child.rb", "class Child < Parent\n  TOKEN\n  TOKEN\n  def self.foo; end\nend\nclass Grandchild < Child\n  def self.bar; end\nend");
+        context.resolve();
+        assert_ancestors_eq!(
+            context,
+            "Grandchild",
+            ["Grandchild", "Child", "BaseOne", "Object", "Kernel", "BasicObject"]
+        );
+
+        context.index_uri("file:///alias.rb", "Parent = BaseTwo");
+        context.resolve();
+
+        assert_ancestors_eq!(
+            context,
+            "Grandchild",
+            ["Grandchild", "Child", "BaseTwo", "Object", "Kernel", "BasicObject"]
+        );
+        assert_constant_reference_to!(context, "BaseTwo::TOKEN", "file:///child.rb:2:3-2:8");
+        assert_constant_reference_to!(context, "BaseTwo::TOKEN", "file:///child.rb:3:3-3:8");
+        assert_ancestors_eq!(
+            context,
+            "Grandchild::<Grandchild>",
+            [
+                "Grandchild::<Grandchild>",
+                "Child::<Child>",
+                "BaseTwo::<BaseTwo>",
+                "Object::<Object>",
+                "BasicObject::<BasicObject>",
+                "Class",
+                "Module",
+                "Object",
+                "Kernel",
+                "BasicObject"
+            ]
+        );
+    }
+}
+
 mod superclass_tests {
     use super::*;
 

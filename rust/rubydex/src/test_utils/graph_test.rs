@@ -122,7 +122,7 @@ impl GraphTest {
     pub fn dependent_name_str(&self, dep: &NameDependent) -> Option<&str> {
         match dep {
             NameDependent::ChildName(id) | NameDependent::NestedName(id) => self.name_str(id),
-            NameDependent::Definition(id) => self
+            NameDependent::Definition(id) | NameDependent::SuperclassConsumer(id) => self
                 .graph()
                 .definitions()
                 .get(id)

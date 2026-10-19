@@ -217,6 +217,10 @@ The purpose of the loop is to solve all of the work that has inverse dependencie
 depend on another constant being resolved. After we're done, we have a separate step for processing definitions that
 have no inverse dependencies (like instance variables).
 
+Superclass reference changes also clear the consuming class's ancestors, descendants, and singleton hierarchy.
+This includes alias target changes that retain the same alias declaration ID.
+Deletion removes these non-owning edges without increasing name reference counts.
+
 When several references share one name, invalidation detaches every reference from the old declaration before it resolves them again.
 
 #### Important design and implementation note
