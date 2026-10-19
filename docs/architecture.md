@@ -141,10 +141,10 @@ offsets combination (i.e.: where they appeared in the code), names are unique ba
 
 ### Names
 
-Names are unique constant name structures that connect all of the pieces required to resolve them against the graph
-(implemented in `rust/rubydex/src/model/name.rs`). They contain the unqualified name of the constant (interned string),
-an optional parent scope (an ID to another name) and an optional nesting (an ID to another name). It is the connection
-of the 3 pieces that allows resolution to determine what a constant refers to.
+Names identify constant lookup structures in the graph
+(implemented in `rust/rubydex/src/model/name.rs`).
+Each name contains an interned string, an optional parent scope, an optional lexical nesting, and a lookup context.
+The default context retains the identity of ordinary names.
 
 For example:
 
@@ -157,6 +157,14 @@ module Foo
   end
 end
 ```
+
+Superclass references use `NameContext::Superclass(DefinitionId)`.
+The class definition keeps its default name, so its resolved declaration cannot replace the superclass lookup result.
+The definition ID uses the ordinary class name, URI, and source offset.
+It does not depend on the superclass reference.
+
+Each component of a superclass constant path uses that context.
+Its parent scope still determines whether lookup is lexical, qualified, or explicitly rooted.
 
 ## Phases
 

@@ -6,7 +6,7 @@ use crate::model::document::Document;
 use crate::model::graph::NameDependent;
 use crate::model::identity_maps::IdentityHashMap;
 use crate::model::ids::{ConstantReferenceId, DefinitionId, MethodReferenceId, NameId, StringId, UriId};
-use crate::model::name::{Name, NameRef, ParentScope};
+use crate::model::name::{Name, NameContext, NameRef, ParentScope};
 use crate::model::references::{ConstantReference, MethodRef};
 use crate::model::string_ref::StringRef;
 use crate::offset::Offset;
@@ -133,7 +133,17 @@ impl LocalGraph {
     }
 
     pub fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
-        let name = Name::new(&self.names, str, parent_scope, nesting);
+        self.add_name_with_context(str, parent_scope, nesting, NameContext::Default)
+    }
+
+    pub fn add_name_with_context(
+        &mut self,
+        str: StringId,
+        parent_scope: ParentScope,
+        nesting: Option<NameId>,
+        context: NameContext,
+    ) -> NameId {
+        let name = Name::new(&self.names, str, parent_scope, nesting).with_context(context);
         let name_id = name.id();
 
         match self.names.entry(name_id) {

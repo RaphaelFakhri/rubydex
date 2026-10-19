@@ -10,8 +10,8 @@ use crate::model::comment::Comment;
 use crate::model::definitions::{DefinitionFlags, Parameter, ParameterStruct, Signatures};
 use crate::model::document::Document;
 use crate::model::identity_maps::IdentityHashMap;
-use crate::model::ids::{NameId, StringId, UriId};
-use crate::model::name::{Name, NameRef, ParentScope};
+use crate::model::ids::{NameId, StringId, UriId, namespace_definition_id};
+use crate::model::name::{Name, NameContext, NameRef, ParentScope};
 use crate::model::string_ref::StringRef;
 use crate::model::visibility::Visibility;
 use crate::offset::Offset;
@@ -155,7 +155,17 @@ impl<'a> RubyOperationBuilder<'a> {
     }
 
     fn add_name(&mut self, str: StringId, parent_scope: ParentScope, nesting: Option<NameId>) -> NameId {
-        let name = Name::new(&self.names, str, parent_scope, nesting);
+        self.add_name_with_context(str, parent_scope, nesting, NameContext::Default)
+    }
+
+    fn add_name_with_context(
+        &mut self,
+        str: StringId,
+        parent_scope: ParentScope,
+        nesting: Option<NameId>,
+        context: NameContext,
+    ) -> NameId {
+        let name = Name::new(&self.names, str, parent_scope, nesting).with_context(context);
         let name_id = name.id();
 
         match self.names.entry(name_id) {
@@ -276,6 +286,15 @@ impl<'a> RubyOperationBuilder<'a> {
     }
 
     fn index_constant_reference(&mut self, node: &ruby_prism::Node, push_final_reference: bool) -> Option<NameId> {
+        self.index_constant_reference_with_context(node, push_final_reference, NameContext::Default)
+    }
+
+    fn index_constant_reference_with_context(
+        &mut self,
+        node: &ruby_prism::Node,
+        push_final_reference: bool,
+        context: NameContext,
+    ) -> Option<NameId> {
         let mut parent_scope_id = ParentScope::None;
 
         let location = match node {
@@ -296,7 +315,7 @@ impl<'a> RubyOperationBuilder<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -317,7 +336,7 @@ impl<'a> RubyOperationBuilder<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -345,7 +364,7 @@ impl<'a> RubyOperationBuilder<'a> {
                     }
 
                     parent_scope_id = self
-                        .index_constant_reference(&parent, true)
+                        .index_constant_reference_with_context(&parent, true, context)
                         .map_or(ParentScope::None, ParentScope::Some);
                 } else {
                     parent_scope_id = ParentScope::TopLevel;
@@ -361,7 +380,12 @@ impl<'a> RubyOperationBuilder<'a> {
         let offset = Offset::from_prism_location(&location);
         let name = Self::location_to_string(&location);
         let string_id = self.intern_string(name);
-        let name_id = self.add_name(string_id, parent_scope_id, self.current_lexical_scope_name_id());
+        let name_id = self.add_name_with_context(
+            string_id,
+            parent_scope_id,
+            self.current_lexical_scope_name_id(),
+            context,
+        );
 
         if push_final_reference {
             self.operations
@@ -633,8 +657,27 @@ impl<'a> RubyOperationBuilder<'a> {
     ) {
         let offset = Offset::from_prism_location(location);
         let (comments, flags) = self.find_comments_for(offset.start());
+        let (name_id, name_offset) = if let Some(name_node) = name_node {
+            let name_loc = match name_node {
+                ruby_prism::Node::ConstantPathNode { .. } => name_node.as_constant_path_node().unwrap().name_loc(),
+                ruby_prism::Node::ConstantPathWriteNode { .. } => {
+                    name_node.as_constant_path_write_node().unwrap().target().name_loc()
+                }
+                _ => name_node.location(),
+            };
+            (
+                self.index_constant_reference(name_node, false),
+                Offset::from_prism_location(&name_loc),
+            )
+        } else {
+            let string_id = self.intern_string(format!("{}:{}<anonymous>", self.uri_id, offset.start()));
+            (Some(self.add_name(string_id, ParentScope::None, None)), offset.clone())
+        };
+        let context = name_id.map_or(NameContext::Default, |id| {
+            NameContext::Superclass(namespace_definition_id(self.uri_id, &offset, id))
+        });
         let superclass_name = superclass_node.as_ref().and_then(|n| {
-            if let Some(id) = self.index_constant_reference(n, false) {
+            if let Some(id) = self.index_constant_reference_with_context(n, false, context) {
                 self.operations
                     .push(Operation::ReferenceConstant(op::ReferenceConstant {
                         name_id: id,
@@ -647,7 +690,7 @@ impl<'a> RubyOperationBuilder<'a> {
             if let ruby_prism::Node::CallNode { .. } = n {
                 let call = n.as_call_node().unwrap();
                 if let Some(receiver) = call.receiver()
-                    && let Some(id) = self.index_constant_reference(&receiver, false)
+                    && let Some(id) = self.index_constant_reference_with_context(&receiver, false, context)
                 {
                     self.operations
                         .push(Operation::ReferenceConstant(op::ReferenceConstant {
@@ -671,23 +714,6 @@ impl<'a> RubyOperationBuilder<'a> {
                 "Dynamic superclass".to_string(),
             );
         }
-
-        let (name_id, name_offset) = if let Some(name_node) = name_node {
-            let name_loc = match name_node {
-                ruby_prism::Node::ConstantPathNode { .. } => name_node.as_constant_path_node().unwrap().name_loc(),
-                ruby_prism::Node::ConstantPathWriteNode { .. } => {
-                    name_node.as_constant_path_write_node().unwrap().target().name_loc()
-                }
-                _ => name_node.location(),
-            };
-            (
-                self.index_constant_reference(name_node, false),
-                Offset::from_prism_location(&name_loc),
-            )
-        } else {
-            let string_id = self.intern_string(format!("{}:{}<anonymous>", self.uri_id, offset.start()));
-            (Some(self.add_name(string_id, ParentScope::None, None)), offset.clone())
-        };
 
         if let Some(name_id) = name_id {
             self.operations.push(Operation::EnterClass(op::EnterClass {
