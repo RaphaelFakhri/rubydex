@@ -76,12 +76,18 @@ class MCPServerIntegrationTest < Minitest::Test
       context.write!("app.rb", "class Dog; end")
 
       stderr_output = +""
-      Open3.popen3(RbConfig.ruby, "-rbundler/setup", executable_path, "mcp", context.absolute_path) do |stdin, stdout, stderr, wait_thr|
+      Open3.popen3(
+        { "RUBYDEX_MCP_SHUTDOWN_DEBUG" => "1" },
+        RbConfig.ruby,
+        "-rbundler/setup",
+        executable_path,
+        "mcp",
+        context.absolute_path,
+      ) do |stdin, stdout, stderr, wait_thr|
         stderr_reader = Thread.new do
-          stderr_output << stderr.read
+          stderr.each_line { |line| stderr_output << line }
         rescue IOError
-          # This thread only drains stderr. If teardown closes the pipe while read is blocked, there is
-          # no more stderr to capture and the subprocess exit status is still checked through wait_thr.
+          # Teardown may close the pipe while this thread is reading it.
         end
 
         initialize_session(stdin, stdout)
@@ -103,6 +109,7 @@ class MCPServerIntegrationTest < Minitest::Test
         stderr_reader.join
       rescue Timeout::Error
         Process.kill("TERM", wait_thr.pid)
+        stderr_reader.join(1)
         flunk("rdx mcp did not exit after stdin closed. stderr:\n#{stderr_output}")
       end
     end

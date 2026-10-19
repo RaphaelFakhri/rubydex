@@ -59,8 +59,10 @@ module Rubydex
           end
         end
       ensure
+        MCPServer.shutdown_debug("input loop ended; starting shutdown")
         run_shutdown
         @transport.close
+        MCPServer.shutdown_debug("shutdown complete")
       end
 
       #: (Hash | Array | untyped) -> Hash | Array[Hash]?
@@ -145,14 +147,17 @@ module Rubydex
       #: -> void
       def run_shutdown
         @incoming_queue.close unless @incoming_queue.closed?
-        join_or_kill_all(@workers + [@indexer])
+        MCPServer.shutdown_debug("incoming queue closed")
+        join_or_kill_all(@workers + [@indexer], "workers and indexer")
         @outgoing_queue.close unless @outgoing_queue.closed?
-        join_or_kill_all([@outgoing_dispatcher])
+        MCPServer.shutdown_debug("outgoing queue closed")
+        join_or_kill_all([@outgoing_dispatcher], "dispatcher")
       end
 
-      #: (Array[Thread?]) -> void
-      def join_or_kill_all(threads)
+      #: (Array[Thread?], String) -> void
+      def join_or_kill_all(threads, group)
         live_threads = threads.compact.select(&:alive?)
+        MCPServer.shutdown_debug("#{group}: #{live_threads.length} live threads")
         return if live_threads.empty?
 
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SHUTDOWN_JOIN_TIMEOUT
@@ -160,11 +165,20 @@ module Rubydex
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
           break if remaining <= 0
 
+          MCPServer.shutdown_debug("#{group}: waiting for thread #{thread.object_id} (status=#{thread.status})")
           thread.join(remaining)
+          MCPServer.shutdown_debug("#{group}: timed join returned for thread #{thread.object_id} (status=#{thread.status})")
         end
 
-        live_threads.select(&:alive?).each(&:kill)
-        live_threads.select(&:alive?).each(&:join)
+        live_threads.select(&:alive?).each do |thread|
+          MCPServer.shutdown_debug("#{group}: killing thread #{thread.object_id} (status=#{thread.status})")
+          thread.kill
+        end
+        live_threads.select(&:alive?).each do |thread|
+          MCPServer.shutdown_debug("#{group}: waiting after kill for thread #{thread.object_id} (status=#{thread.status})")
+          thread.join
+          MCPServer.shutdown_debug("#{group}: post-kill join returned for thread #{thread.object_id}")
+        end
       end
 
       #: -> Thread

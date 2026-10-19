@@ -4,6 +4,16 @@ require "json"
 
 module Rubydex
   module MCPServer
+    class << self
+      #: (String) -> void
+      def shutdown_debug(message)
+        return unless ENV["RUBYDEX_MCP_SHUTDOWN_DEBUG"] == "1"
+
+        $stderr.puts("rubydex mcp pid=#{Process.pid}: #{message}")
+        $stderr.flush
+      end
+    end
+
     module JSONRPC
       PARSE_ERROR = -32_700
       INVALID_REQUEST = -32_600
@@ -133,11 +143,13 @@ module Rubydex
 
       #: { (Hash | Array?, Hash?) -> void } -> void
       def open
+        MCPServer.shutdown_debug("reading stdin")
         @input.each_line do |line|
           yield JSON.parse(line, symbolize_names: true)
         rescue JSON::ParserError
           yield nil, JSONRPC.error_response(nil, JSONRPC::PARSE_ERROR, "Parse error", data: "Invalid JSON")
         end
+        MCPServer.shutdown_debug("stdin reached EOF")
       end
 
       #: (Hash | Array[Hash]?) -> void
