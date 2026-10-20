@@ -1251,6 +1251,46 @@ mod method_tests {
     }
 
     #[test]
+    fn index_def_node_with_no_block_parameter() {
+        let context = index_source({
+            "
+                def foo(a, &nil); end
+                "
+        });
+
+        assert_no_local_diagnostics!(&context);
+
+        assert_definition_at!(&context, "1:1-1:22", Method, |def| {
+            assert_simple_signature!(def, |params| {
+                assert_eq!(params.len(), 1);
+                assert_parameter!(&params[0], RequiredPositional, |param| {
+                    assert_string_eq!(context, param.str(), "a");
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn index_def_node_with_trailing_comma_in_parameters() {
+        let context = index_source({
+            "
+                def foo(a,); end
+                "
+        });
+
+        assert_no_local_diagnostics!(&context);
+
+        assert_definition_at!(&context, "1:1-1:17", Method, |def| {
+            assert_simple_signature!(def, |params| {
+                assert_eq!(params.len(), 1);
+                assert_parameter!(&params[0], RequiredPositional, |param| {
+                    assert_string_eq!(context, param.str(), "a");
+                });
+            });
+        });
+    }
+
+    #[test]
     fn index_nested_method_definitions() {
         let context = index_source({
             "

@@ -99,7 +99,7 @@ dependencies = [
  "quote",
  "regex",
  "rustc-hash",
- "shlex",
+ "shlex 1.3.0",
  "syn",
 ]
 
@@ -151,7 +151,7 @@ version = "1.2.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "deec109607ca693028562ed836a5f1c4b8bd77755c4e132fc5ce11b0b6211ae7"
 dependencies = [
- "shlex",
+ "shlex 1.3.0",
 ]
 
 [[package]]
@@ -718,9 +718,9 @@ checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
 name = "ruby-prism"
-version = "1.9.0"
+version = "2.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b302f00359d0b5423a600314935ca5f994484e15da2db5345631d28c6e029d6"
+checksum = "6d34b0f30ca0b7233a454827204ee7dc1a70d8faa3a26eae95f09ada5386757c"
 dependencies = [
  "ruby-prism-sys",
  "serde",
@@ -729,12 +729,12 @@ dependencies = [
 
 [[package]]
 name = "ruby-prism-sys"
-version = "1.9.0"
+version = "2.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f85fd9571455bdca2b3bf0b2f543cd13ac39d5de0026a8eb2deb94ffd264f00"
+checksum = "f0e59b94e20c878bb618a355abd00724ad1eb4514341936c6668bea987437a29"
 dependencies = [
- "bindgen",
  "cc",
+ "shlex 2.0.1",
 ]
 
 [[package]]
@@ -901,6 +901,12 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "smallvec"

@@ -112,7 +112,7 @@ impl<'a> RubyOperationBuilder<'a> {
             self.add_diagnostic(
                 Rule::ParseError,
                 Offset::from_prism_location(&error.location()),
-                error.message().to_string(),
+                String::from_utf8_lossy(error.message()).to_string(),
             );
         }
 
@@ -120,7 +120,7 @@ impl<'a> RubyOperationBuilder<'a> {
             self.add_diagnostic(
                 Rule::ParseWarning,
                 Offset::from_prism_location(&warning.location()),
-                warning.message().to_string(),
+                String::from_utf8_lossy(warning.message()).to_string(),
             );
         }
 
@@ -489,6 +489,7 @@ impl<'a> RubyOperationBuilder<'a> {
 
     // -- Parameters --
 
+    #[allow(clippy::too_many_lines)]
     fn collect_parameters(&mut self, node: &ruby_prism::DefNode) -> Vec<Parameter> {
         let mut parameters: Vec<Parameter> = Vec::new();
 
@@ -588,7 +589,9 @@ impl<'a> RubyOperationBuilder<'a> {
             }
         }
 
-        if let Some(block) = parameters_list.block() {
+        if let Some(block) = parameters_list.block()
+            && let Some(block) = block.as_block_parameter_node()
+        {
             let location = block.name_loc().unwrap_or_else(|| block.location());
             let str_id = self.intern_string(Self::location_to_string(&location));
             parameters.push(Parameter::Block(ParameterStruct::new(
@@ -1036,8 +1039,8 @@ impl<'a> RubyOperationBuilder<'a> {
         match arg {
             ruby_prism::Node::SymbolNode { .. } => {
                 let symbol = arg.as_symbol_node().unwrap();
-                let value_loc = symbol.value_loc()?;
-                Some((Self::location_to_string(&value_loc), value_loc))
+                let content_loc = symbol.content_loc();
+                Some((Self::location_to_string(&content_loc), content_loc))
             }
             ruby_prism::Node::StringNode { .. } => {
                 let string = arg.as_string_node().unwrap();
@@ -1380,7 +1383,7 @@ impl CommentGroup {
 
     fn accepts(&self, next: &ruby_prism::Comment, source: &str) -> bool {
         let current_end_offset = self.end_offset;
-        let next_line_start_offset = next.location().start_offset();
+        let next_line_start_offset = next.location().start() as usize;
         let between = &source.as_bytes()[current_end_offset..next_line_start_offset];
         if !between.iter().all(|&b| b.is_ascii_whitespace()) {
             return false;
@@ -1389,7 +1392,7 @@ impl CommentGroup {
     }
 
     fn add_comment(&mut self, comment: &ruby_prism::Comment) {
-        self.end_offset = comment.location().end_offset();
+        self.end_offset = comment.location().end() as usize;
         let text = String::from_utf8_lossy(comment.location().as_slice()).to_string();
         if text.lines().any(|line| line.starts_with("# @deprecated")) {
             self.deprecated = true;
@@ -1783,10 +1786,17 @@ impl Visit<'_> for RubyOperationBuilder<'_> {
             });
         };
 
-        let message_loc = node.message_loc();
-        if message_loc.is_none() {
+        let message_loc = if node.name().as_slice().is_empty() {
+            // Incomplete calls like `Foo.` have no message. We still index them using the call operator location, so
+            // that the receiver's singleton class gets created, which completion depends on
+            node.call_operator_loc()
+        } else {
+            node.message_loc()
+        };
+
+        let Some(message_loc) = message_loc else {
             return;
-        }
+        };
 
         let message = String::from_utf8_lossy(node.name().as_slice()).to_string();
 
@@ -2005,11 +2015,11 @@ impl Visit<'_> for RubyOperationBuilder<'_> {
                     self.visit(&receiver);
                 }
 
-                self.index_method_reference(message.clone(), &node.message_loc().unwrap(), method_receiver);
+                self.index_method_reference(message.clone(), &message_loc, method_receiver);
 
                 match message.as_str() {
                     ">" | "<" | ">=" | "<=" => {
-                        self.index_method_reference("<=>".to_string(), &node.message_loc().unwrap(), method_receiver);
+                        self.index_method_reference("<=>".to_string(), &message_loc, method_receiver);
                     }
                     _ => {}
                 }
@@ -2134,7 +2144,7 @@ impl Visit<'_> for RubyOperationBuilder<'_> {
             match expression {
                 ruby_prism::Node::SymbolNode { .. } => {
                     let symbol = expression.as_symbol_node().unwrap();
-                    let name = Self::location_to_string(&symbol.value_loc().unwrap());
+                    let name = Self::location_to_string(&symbol.content_loc());
                     self.index_method_reference(name, &node.location(), None);
                 }
                 _ => {
@@ -2146,13 +2156,13 @@ impl Visit<'_> for RubyOperationBuilder<'_> {
 
     fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'_>) {
         let mut new_name = if let Some(symbol_node) = node.new_name().as_symbol_node() {
-            Self::location_to_string(&symbol_node.value_loc().unwrap())
+            Self::location_to_string(&symbol_node.content_loc())
         } else {
             Self::location_to_string(&node.new_name().location())
         };
 
         let mut old_name = if let Some(symbol_node) = node.old_name().as_symbol_node() {
-            Self::location_to_string(&symbol_node.value_loc().unwrap())
+            Self::location_to_string(&symbol_node.content_loc())
         } else {
             Self::location_to_string(&node.old_name().location())
         };
