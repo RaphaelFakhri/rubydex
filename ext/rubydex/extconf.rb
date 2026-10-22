@@ -29,6 +29,7 @@ bindings_path = root_dir.join("rubydex-sys").join("rustbindings.h")
 
 cargo_args = ["--manifest-path #{root_dir.join("Cargo.toml")}"]
 cargo_args << "$(CARGO_PROFILE_FLAG)"
+cargo_args << "--features rubydex-sys/generate_bindings"
 
 if Gem.win_platform?
   cargo_args << "--target x86_64-pc-windows-gnu"

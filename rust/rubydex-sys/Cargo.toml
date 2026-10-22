@@ -20,8 +20,11 @@ libc = "0.2.174"
 url = "2.5.4"
 line-index = "0.1.2"
 
+[features]
+generate_bindings = ["dep:cbindgen"]
+
 [build-dependencies]
-cbindgen = "0.29"
+cbindgen = { version = "0.29", optional = true }
 
 [lints]
 workspace = true
