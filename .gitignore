@@ -15,7 +15,6 @@
 /ext/rubydex/Makefile
 mkmf.log
 target/
-rust/rubydex-sys/rustbindings.h
 ext/rubydex/rustbindings.h
 ext/rubydex/compile_commands.json
 ext/rubydex/.cache

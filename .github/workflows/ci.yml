@@ -39,6 +39,15 @@ jobs:
             exit 1
           fi
 
+      - name: Check generated C header is up to date
+        run: |
+          changes=$(git status --porcelain rust/rubydex-sys/rustbindings.h)
+          if [ -n "$changes" ]; then
+            echo "$changes"
+            echo "Generated C header is stale. Run \`bundle exec rake compile\` and commit the result."
+            exit 1
+          fi
+
       - name: Run Rubydex linter
         run: bundle exec rdx lint
 

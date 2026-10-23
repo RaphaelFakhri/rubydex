@@ -1,6 +1,5 @@
-extern crate cbindgen;
-
 fn main() {
+    #[cfg(feature = "generate_bindings")]
     cbindgen::generate(".")
         .expect("Unable to generate bindings")
         .write_to_file("rustbindings.h");
